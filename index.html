@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>カード明細集計</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #24292f; --muted: #6e7781; --line: #d8dee4;
+    --head: #f1f3f5; --sub: #f8f9fa; --total: #e9ecef; --unreg: #fff2cc; --accent: #2f6fde;
+    --ok: #2e8b57; --bad: #c0392b;
+    --Mastercard: #e2582b; --VISA: #1a4fa0; --Olive: #4f8a3c; --MF: #e07b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16191d; --card: #1f2329; --ink: #e6e9ed; --muted: #9aa4ae; --line: #343a42;
+      --head: #2a2f36; --sub: #242930; --total: #313740; --unreg: #4a4020; --accent: #6f9be8;
+      --ok: #5cc995; --bad: #f07a76;
+      --Mastercard: #f2875f; --VISA: #6f9be8; --Olive: #8cc472; --MF: #ffa94d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, "Hiragino Sans", sans-serif; font-size: 14px;
+         padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 32px); }
+  main { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0 10px; }
+  h1 { font-size: 20px; margin: 0; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  input[type=text], input[type=email], input[type=password], select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .btn { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 11px; cursor: pointer; font-size: 13px; }
+  .btn:hover { background: var(--head); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .grow { flex: 1; }
+
+  .account { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; margin-left: auto; }
+  .account .who { font-weight: 700; }
+  .cloud { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--head); }
+  .cloud.on { color: var(--ok); } .cloud.off { color: var(--muted); } .cloud.err { color: var(--bad); }
+  .notice { background: var(--unreg); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto; }
+  .tabs button { border: 0; background: transparent; padding: 9px 14px; cursor: pointer; font-weight: 700; color: var(--muted); border-bottom: 3px solid transparent; white-space: nowrap; }
+  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .tabs .badge { background: var(--unreg); color: var(--ink); border-radius: 999px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
+  .pane { display: none; } .pane.on { display: block; }
+  #pane-master.over { outline: 3px dashed var(--accent); outline-offset: 6px; border-radius: 12px; }
+
+  .monthbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .monthbar select { font-weight: 700; }
+
+  .zones { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .zone { border: 2px dashed var(--line); border-radius: 12px; padding: 12px; background: var(--card); text-align: center; cursor: pointer; transition: background .15s, border-color .15s; }
+  .zone.over { background: var(--head); border-color: var(--zc); }
+  .zone.has { border-style: solid; }
+  .zone .name { font-weight: 800; font-size: 16px; color: var(--zc); }
+  .zone .stat { margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .zone .line { font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .zone .ok { color: var(--ok); } .zone .bad { color: var(--bad); }
+  .zone .clr { margin-top: 6px; }
+  .busy { opacity: .5; pointer-events: none; }
+
+  .titlebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .titlebar h2 { margin: 0; font-size: 17px; }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; white-space: nowrap; }
+  td.n, th.n { text-align: right; }
+  .detail thead th { background: var(--head); text-align: center; position: sticky; top: 0; }
+  .detail tbody td { border-top-style: dotted; border-bottom-style: dotted; }
+  .detail tr.unreg td { background: var(--unreg); }
+  .detail td.store { white-space: normal; min-width: 10em; }
+  .detail td.store .raw { display: block; font-size: 11px; color: var(--muted); }
+  .detail .reg { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0 0 0 4px; }
+  .scroll { max-height: 70vh; overflow: auto; border-radius: 8px; }
+
+  .block { margin-bottom: 16px; }
+  .block th { background: var(--head); text-align: center; }
+  .block td { border-top-style: dotted; border-bottom-style: dotted; }
+  .block tr.subtotal td { background: var(--sub); font-weight: 700; border-top: 1px dashed var(--ink); border-bottom-style: solid; }
+  .block tr.other td { border-top-style: solid; }
+  .block tr.total td { background: var(--total); font-weight: 700; border-top-style: solid; }
+  .block tr.unreg td:first-child { background: var(--unreg); }
+  .block tr.click { cursor: pointer; }
+  .block tr.click:hover td { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+  .trend th { background: var(--head); text-align: center; position: sticky; top: 0; }
+  .trend td.name { position: sticky; left: 0; background: var(--card); }
+  .trend tr.total td { background: var(--total); font-weight: 700; }
+  .trend tr.subtotal td { background: var(--sub); font-weight: 700; }
+  .trend td.heat { background: color-mix(in srgb, var(--accent) calc(var(--h) * 28%), transparent); }
+  .trend td.up { color: var(--bad); }
+
+  .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip { background: var(--head); border-radius: 999px; padding: 2px 8px 2px 10px; font-size: 12px; }
+  .chip button { border: 0; background: transparent; cursor: pointer; color: var(--muted); }
+
+  .master input { width: 100%; border: 0; background: transparent; padding: 4px 2px; min-width: 6em; }
+  .master input:focus { outline: 2px solid var(--accent); border-radius: 4px; background: var(--bg); }
+  .master th { background: var(--head); }
+  .master th input { font-weight: 700; text-align: center; }
+  .master td.ops, .master th.ops { width: 1%; white-space: nowrap; text-align: center; }
+  .master td.ops button, .master th button { border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 2px 4px; }
+  .master tr.flash td { animation: flash 1.6s; }
+  @keyframes flash { 0%, 40% { background: var(--unreg); } }
+  .master td.hit { font-size: 11px; color: var(--muted); text-align: right; }
+  textarea { width: 100%; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); font-family: ui-monospace, monospace; font-size: 12px; }
+  .unreglist { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .unreglist button { border: 1px solid var(--line); background: var(--unreg); border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; z-index: 9; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>💳 カード明細集計</h1>
+    <div class="account" id="account"></div>
+  </header>
+  <div id="notice"></div>
+
+  <div class="tabs" id="tabs">
+    <button data-tab="card" class="on">クレジットカード</button>
+    <button data-tab="mf">マネーフォワード</button>
+    <button data-tab="trend">推移</button>
+    <button data-tab="master">種別マスタ <span class="badge" id="unregBadge" hidden></span></button>
+  </div>
+
+  <section class="pane on" id="pane-card">
+    <div class="monthbar"><select id="month-card"></select><span class="muted">CSVをドロップすると、その請求月に保存されます（同じカード・同じ請求月は置きかえ）。</span></div>
+    <div class="zones" id="zones-card"></div>
+    <div id="report-card"></div>
+  </section>
+
+  <section class="pane" id="pane-mf">
+    <div class="monthbar"><select id="month-mf"></select><span class="muted">マネーフォワードは利用した月ごとに保存されます。</span></div>
+    <div class="zones" id="zones-mf"></div>
+    <p class="muted">取りこむのは「三井住友カード (VpassID)」「かぞくのおさいふ」（入金・キャッシュバック除く）「三井住友銀行」のV〜で始まる明細（プリペイドチャージ除く）です。</p>
+    <div id="report-mf"></div>
+  </section>
+
+  <section class="pane" id="pane-trend">
+    <div class="card">
+      <div class="filters">
+        <select id="trendMode"><option value="card">クレジットカード（請求月）</option><option value="mf">マネーフォワード（利用月）</option></select>
+        <select id="trendAxis"></select>
+        <select id="trendSpan"><option value="6">6か月</option><option value="12" selected>12か月</option><option value="24">24か月</option><option value="0">ぜんぶ</option></select>
+        <span class="grow"></span>
+        <button class="btn" id="trendCopy">表をコピー</button>
+      </div>
+      <div class="scroll" id="trendBox"></div>
+      <p class="muted">色が濃いほどその行の中で金額が大きい月。赤字は前の月より2割以上ふえた月。</p>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-master">
+    <div class="card">
+      <div class="titlebar">
+        <h2>種別マスタ</h2><span class="grow"></span>
+        <button class="btn" id="addRow">＋ 行を追加</button>
+        <button class="btn" id="addAxis">＋ 集計軸（列）を追加</button>
+      </div>
+      <p class="muted">
+        パターンは店名と完全一致、または <b>*</b> でワイルドカード（<b>*</b>＝なんでもOKな文字列。どこに何こ書いてもOK）。
+        例：<code>*ANTHROPIC*</code>＝ANTHROPICを含む、<code>AMAZON*</code>＝で始まる、<code>*ストア</code>＝で終わる、<code>*CLAUDE*SUB*</code>＝CLAUDEのあとにSUB。
+        大文字・小文字、全角・半角、スペースの数はそろえてから比べます。上の行ほど優先。
+        タグはカンマで区切っていくつでも（例：<code>AI, 仕事, 経費</code>）。
+        マッチした明細は「表示名」にまとめられます。集計軸の名前に <b>*</b> を入れるとその軸は集計しません。上にある行ほど集計表で上に並びます。
+      </p>
+      <div class="filters">
+        <input type="text" id="tester" placeholder="店名をためす（例：ANTHROPIC (ANTHROPIC.COM)）" style="flex:1;min-width:16em">
+        <span id="testerOut" class="muted"></span>
+      </div>
+      <div id="unregBox"></div>
+      <div class="scroll"><table class="master" id="masterTable"></table></div>
+    </div>
+    <div class="card">
+      <details>
+        <summary><b>スプレッドシートから読みこみ／書き出し</b></summary>
+        <p class="muted">「種別」シートをCSVでダウンロードしてこの画面にドロップ（または下のボタンで選ぶ）するか、1行目（見出し）ごとコピーして下に貼りつけ →「マスタを置きかえ」。A列=パターン、B列=表示名、C列以降=集計軸。</p>
+        <div class="filters"><label class="btn" for="masterFile">CSVファイルから読みこみ</label><input type="file" id="masterFile" accept=".csv,.tsv,.txt,text/csv" hidden></div>
+        <textarea id="masterPaste" placeholder="パターン	表示名	種別	…"></textarea>
+        <div class="filters" style="margin-top:8px">
+          <button class="btn primary" id="masterImport">マスタを置きかえ</button>
+          <button class="btn" id="masterCopy">いまのマスタをコピー（シートに貼れる形）</button>
+        </div>
+      </details>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== Settings =====
+const SB_URL = 'https://kfslyphplctdfjiwsjut.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtmc2x5cGhwbGN0ZGZqaXdzanV0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5NDkzMjQsImV4cCI6MjA5NjUyNTMyNH0.EAo76m7MLbeLFYZvAQVb6zMfzYlovMbCS_6wefYzsYQ';
+const CARD_ZONES = ['Mastercard', 'VISA', 'Olive'];
+const MF_ACCOUNTS = [
+  // account: 保有金融機関, label: 種別集計の名前, only: 内容の条件, skip: 内容にこれを含んだら除外
+  { account: '三井住友カード (VpassID)', label: '三井住友カード' },
+  { account: 'かぞくのおさいふ', label: 'かぞくのおさいふ', skip: ['入金', 'キャッシュバック'] },
+  { account: '三井住友銀行', label: '三井住友銀行', only: /^V\d+/i, skip: ['SMCC(PREPAID)', 'プリペイドチャージ'] },
+];
+const OTHER = 'その他';
+const NO_STORE = '（未入力）';
+const KEY = 'card-summary-v2';
+const KIND_LABEL = { confirmed: '確定後', pending: '確定前', mixed: '確定前＋確定後', mf: '' };
+
+// ===== State =====
+// tx:      [{source, claim, label, date, store, amount}]
+// imports: [{source, claim, kind, bill_total, row_sum, row_count, file_name}]
+let state = loadLocal();
+let tab = 'card';
+let sel = { card: null, mf: null };
+const view = { card: { q: '', only: false, pick: null }, mf: { q: '', only: false, pick: null } };
+let sb = null, user = null, cloud = 'off'; // off | on | busy | err
+
+function emptyState() { return { master: { axes: ['種別'], rows: [] }, tx: [], imports: [] }; }
+function loadLocal() {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY));
+    if (v) return { ...emptyState(), ...v };
+    const old = JSON.parse(localStorage.getItem('card-summary-v1')); // earlier version: keep the master
+    if (old?.master) return { ...emptyState(), master: old.master };
+  } catch {}
+  return emptyState();
+}
+function saveLocal() {
+  if (user) return; // signed in: data lives in Supabase, not in this browser
+  try { localStorage.setItem(KEY, JSON.stringify(state)); }
+  catch { toast('ブラウザに保存できませんでした'); }
+}
+function localHasData() {
+  try { const v = JSON.parse(localStorage.getItem(KEY)); return !!v && (v.tx?.length || v.master?.rows?.length); } catch { return false; }
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 2600);
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => Math.round(n).toLocaleString('ja-JP');
+const pad2 = n => String(n).padStart(2, '0');
+const claimLabel = c => c ? `${c.slice(0, 4)}年${+c.slice(5)}月` : '';
+const addMonth = (ym, d) => { const [y, m] = ym.split('-').map(Number); const t = new Date(y, m - 1 + d, 1); return `${t.getFullYear()}-${pad2(t.getMonth() + 1)}`; };
+
+// ===== CSV =====
+function decode(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^﻿/, ''); }
+  catch { return new TextDecoder('shift_jis').decode(buf); }
+}
+function parseCSV(text) {
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.map(r => r.map(c => c.trim()));
+}
+function toDate(s) {
+  const m = String(s ?? '').trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  return m ? `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}` : null;
+}
+function toNum(s) {
+  const t = String(s ?? '').normalize('NFKC').replace(/[,円¥\s]/g, '').trim();
+  return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : null;
+}
+
+// Vpass (三井住友カード / Olive) CSV. Only rows whose first cell is a date are statement lines.
+//
+// 確定後 (明細確定済み, Shift_JIS):
+//   header:  氏名, カード番号, カード名        (repeats per card section, e.g. Apple Pay/iD)
+//   row:     利用日, 利用店名, 利用金額, 支払区分, 回数, 支払金額, 備考
+//   footer:  ,,,,,請求合計,
+//   -> amount = 支払金額 (col 5); this is what the footer total adds up.
+//
+// 確定前 (速報):
+//   row:     利用日, 利用店名, 利用者, 支払区分, (空), 請求月('26/11), 利用金額, 支払金額, ..., 外貨額, 通貨, レート, 換算日
+//   -> amount = 利用金額 (col 6); 支払金額 (col 7) is blank for foreign-currency lines until they settle.
+function parseCardCSV(rows, label) {
+  const out = [];
+  let kind = null, billTotal = null, sum = 0, claimInFile = null;
+  for (const r of rows) {
+    const date = toDate(r[0]);
+    if (!date) {
+      // Footer of a confirmed statement: blank date, total in col 5.
+      if (!r[0] && !r[1] && toNum(r[5]) !== null) billTotal = (billTotal || 0) + toNum(r[5]);
+      continue;
+    }
+    let amount, rowKind;
+    if (toNum(r[2]) !== null) {           // 確定後: col 2 is a number
+      rowKind = 'confirmed';
+      amount = toNum(r[5]) ?? toNum(r[2]);
+    } else {                               // 確定前: col 2 is 利用者 (ご本人 / 家族)
+      rowKind = 'pending';
+      amount = toNum(r[6]) ?? toNum(r[7]) ?? toNum(r[5]) ?? 0;
+      const m = String(r[5] || '').match(/(\d{2})\/(\d{1,2})/);
+      if (m && !claimInFile) claimInFile = `20${m[1]}-${pad2(m[2])}`;
+    }
+    kind = kind && kind !== rowKind ? 'mixed' : rowKind;
+    sum += amount;
+    out.push({ date, store: r[1] || '', amount, label });
+  }
+  return { rows: out, kind, billTotal, sum, claimInFile };
+}
+
+// 請求月: 確定前CSVの請求月列 → ファイル名の YYYYMM（Vpassの既定の名前）→ いちばん古い利用日の翌月
+function claimOf(parsed, fileName) {
+  if (parsed.claimInFile) return parsed.claimInFile;
+  const m = fileName.match(/(20\d{2})(0[1-9]|1[0-2])/);
+  if (m) return `${m[1]}-${m[2]}`;
+  const min = parsed.rows.map(r => r.date).sort()[0];
+  return min ? addMonth(min.slice(0, 7), 1) : null;
+}
+
+function parseMFCSV(rows) {
+  const hi = rows.findIndex(r => r.includes('保有金融機関'));
+  const h = hi >= 0 ? rows[hi] : [];
+  const col = (name, fb) => { const i = h.findIndex(x => x.startsWith(name)); return i >= 0 ? i : fb; };
+  const iDate = col('日付', 1), iDesc = col('内容', 2), iAmt = col('金額', 3), iAcc = col('保有金融機関', 4);
+  const out = []; let skipped = 0;
+  for (const r of rows.slice(hi + 1)) {
+    const acc = (r[iAcc] || '').trim(), desc = (r[iDesc] || '').trim();
+    const date = toDate(r[iDate]);
+    if (!acc || !date) continue;
+    const rule = MF_ACCOUNTS.find(a => a.account === acc && (!a.only || a.only.test(desc)));
+    if (!rule) { skipped++; continue; }
+    if (rule.skip && rule.skip.some(k => desc.includes(k))) continue;
+    out.push({ date, store: desc, amount: -(toNum(r[iAmt]) ?? 0), label: rule.label });
+  }
+  return { rows: out, skipped };
+}
+
+// ===== Storage (local or Supabase) =====
+function applyReplace(source, claims, rows, imports) {
+  state.tx = state.tx.filter(t => !(t.source === source && claims.includes(t.claim))).concat(rows);
+  state.imports = state.imports.filter(i => !(i.source === source && claims.includes(i.claim))).concat(imports);
+}
+async function replaceStatements(source, claims, rows, imports) {
+  if (user) {
+    setCloud('busy');
+    const { error } = await sb.rpc('cc_replace_statement', {
+      p_source: source, p_claims: claims,
+      p_rows: rows.map(r => ({ claim: r.claim, label: r.label, date: r.date, store: r.store, amount: Math.round(r.amount) })),
+      p_imports: imports,
+    });
+    if (error) { setCloud('err'); throw error; }
+    setCloud('on');
+  }
+  applyReplace(source, claims, rows, imports);
+  saveLocal();
+}
+async function deleteStatement(source, claim) {
+  if (user) {
+    setCloud('busy');
+    const { error } = await sb.rpc('cc_delete_statement', { p_source: source, p_claim: claim });
+    if (error) { setCloud('err'); throw error; }
+    setCloud('on');
+  }
+  applyReplace(source, [claim], [], []);
+  saveLocal();
+}
+let masterTimer = null;
+function saveMaster() {
+  if (!user) { saveLocal(); return; }
+  clearTimeout(masterTimer);
+  setCloud('busy');
+  masterTimer = setTimeout(async () => {
+    const { error } = await sb.from('cc_master').upsert({ user_id: user.id, data: state.master, updated_at: new Date().toISOString() });
+    if (error) { setCloud('err'); toast('マスタをクラウドに保存できませんでした'); console.error(error); }
+    else setCloud('on');
+  }, 800);
+}
+
+async function cloudLoad() {
+  setCloud('busy');
+  try {
+    const [m, im] = await Promise.all([
+      sb.from('cc_master').select('data').maybeSingle(),
+      sb.from('cc_imports').select('source,claim,kind,bill_total,row_sum,row_count,file_name'),
+    ]);
+    if (m.error) throw m.error;
+    if (im.error) throw im.error;
+    const tx = [];
+    for (let from = 0; ; from += 1000) { // PostgREST returns at most 1000 rows per request
+      const { data, error } = await sb.from('cc_tx').select('source,claim,label,use_date,store,amount').order('id').range(from, from + 999);
+      if (error) throw error;
+      tx.push(...data.map(r => ({ source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount })));
+      if (data.length < 1000) break;
+    }
+    state = { master: m.data?.data?.axes ? m.data.data : emptyState().master, tx, imports: im.data };
+    setCloud('on');
+  } catch (e) {
+    console.error(e); setCloud('err');
+    toast('クラウドから読みこめませんでした（テーブルを作るSQLは実行ずみ？）');
+  }
+  sel = { card: null, mf: null };
+  render();
+}
+
+async function uploadLocal() {
+  const local = loadLocal();
+  if (!confirm(`このブラウザのデータ（明細 ${local.tx.length}件・マスタ ${local.master.rows.length}行）をクラウドに送りますか？\n同じカード・同じ月のクラウドのデータは置きかわります。`)) return;
+  try {
+    if (local.master.rows.length && (!state.master.rows.length || confirm('クラウドのマスタも、このブラウザのマスタで置きかえますか？'))) {
+      state.master = local.master; saveMaster();
+    }
+    for (const src of [...CARD_ZONES, 'MF']) {
+      const imps = local.imports.filter(i => i.source === src);
+      if (!imps.length) continue;
+      const claims = imps.map(i => i.claim);
+      await replaceStatements(src, claims, local.tx.filter(t => t.source === src && claims.includes(t.claim)), imps);
+    }
+    localStorage.removeItem(KEY);
+    toast('クラウドに送りました。このブラウザのコピーは消しました');
+  } catch (e) { console.error(e); toast('送れませんでした: ' + (e.message || e)); }
+  render();
+}
+
+// ===== Account =====
+function setCloud(s) { cloud = s; renderAccount(); }
+function renderAccount() {
+  const box = document.getElementById('account');
+  if (!sb) { box.innerHTML = '<span class="cloud off">オフライン（このブラウザだけに保存）</span>'; return; }
+  if (user) {
+    const label = { on: '☁ クラウドに保存ずみ', busy: '☁ 保存中…', err: '⚠ クラウドエラー', off: '' }[cloud];
+    box.innerHTML = `<span class="cloud ${cloud === 'err' ? 'err' : 'on'}">${label}</span>
+      <span class="who">${esc(user.email)}</span><button class="btn" id="logout">ログアウト</button>`;
+    box.querySelector('#logout').onclick = async () => { await sb.auth.signOut(); };
+  } else {
+    box.innerHTML = `<span class="cloud off">ログインしていません（このブラウザだけに保存）</span>
+      <input type="email" id="em" placeholder="メール" autocomplete="username" size="18">
+      <input type="password" id="pw" placeholder="パスワード" autocomplete="current-password" size="12">
+      <button class="btn primary" id="login">ログイン</button><button class="btn" id="signup">新規登録</button>`;
+    const em = box.querySelector('#em'), pw = box.querySelector('#pw');
+    const go = async signup => {
+      if (!em.value || !pw.value) { toast('メールとパスワードを入れてね'); return; }
+      const fn = signup ? sb.auth.signUp.bind(sb.auth) : sb.auth.signInWithPassword.bind(sb.auth);
+      const { data, error } = await fn({ email: em.value.trim(), password: pw.value });
+      if (error) { toast((signup ? '登録' : 'ログイン') + 'できませんでした: ' + error.message); return; }
+      if (signup && !data.session) toast('確認メールを送りました。メールのリンクをひらいてからログインしてね');
+    };
+    box.querySelector('#login').onclick = () => go(false);
+    box.querySelector('#signup').onclick = () => go(true);
+    pw.onkeydown = e => { if (e.key === 'Enter') go(false); };
+  }
+}
+function renderNotice() {
+  const box = document.getElementById('notice');
+  box.innerHTML = user && localHasData()
+    ? `<div class="notice">このブラウザに、ログイン前のデータが残っています。<button class="btn" id="upl">クラウドに送る</button><button class="btn" id="dropLocal">消す</button></div>` : '';
+  const u = box.querySelector('#upl'); if (u) u.onclick = uploadLocal;
+  const d = box.querySelector('#dropLocal'); if (d) d.onclick = () => {
+    if (confirm('このブラウザに残っているログイン前のデータを消しますか？（クラウドのデータは消えません）')) { localStorage.removeItem(KEY); renderNotice(); }
+  };
+}
+
+// ===== Master matching (same rules as the spreadsheet script) =====
+function normStore(s) {
+  if (!s) return '';
+  return String(s).normalize('NFKC')
+    .replace(/[‐‑‒–—―−－‗]/g, 'ー')
+    .replace(/[\s ᠎ -​  　]+/g, ' ').trim();
+}
+function compileMaster() {
+  const m = state.master;
+  const entries = [];
+  const byName = new Map();
+  for (const r of m.rows) {
+    const pattern = normStore(r.pattern);
+    if (!pattern) continue;
+    const name = (r.name || '').trim() || pattern.replace(/\*/g, '');
+    const e = { pattern, name, cats: r.cats || [], tags: splitTags(r.tags), row: m.rows.indexOf(r) };
+    entries.push(e);
+    // One entry per display name for categories; the first row with a name decides its order,
+    // and its categories are kept unless a later row fills in a blank one. Tags are merged.
+    const prev = byName.get(name);
+    if (!prev) byName.set(name, { ...e, cats: [...e.cats], tags: [...e.tags] });
+    else {
+      e.cats.forEach((c, i) => { if (String(prev.cats[i] ?? '').trim() === '' && String(c ?? '').trim()) prev.cats[i] = c; });
+      e.tags.forEach(t => { if (!prev.tags.includes(t)) prev.tags.push(t); });
+    }
+  }
+  const order = new Map([...byName.keys()].map((k, i) => [k, i]));
+  // "*" anywhere in a pattern means "any characters (including none)", and case is ignored.
+  // This covers the spreadsheet's rules (*x*, *x, x*), so old patterns still match the same stores.
+  const wild = entries.filter(e => e.pattern.includes('*') && e.pattern.replace(/\*/g, '')).map(e => ({
+    name: e.name, row: e.row,
+    re: new RegExp('^' + e.pattern.split('*').map(s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 'i'),
+  }));
+  const cache = new Map();
+  function find(store) {
+    if (!store) return null;
+    if (cache.has(store)) return cache.get(store);
+    const raw = String(store).trim(), n = normStore(store), nl = n.toLowerCase();
+    let hit = null;
+    // Check every row's pattern, not just one per display name: several rows often share a name.
+    for (const e of entries) if (e.name === raw || e.pattern.toLowerCase() === nl || e.name === n) { hit = { name: e.name, row: e.row, how: '完全一致' }; break; }
+    if (!hit) for (const w of wild) if (w.re.test(n)) { hit = { name: w.name, row: w.row, how: 'ワイルドカード' }; break; }
+    cache.set(store, hit);
+    return hit;
+  }
+  const match = store => store ? (find(store)?.name ?? String(store).trim()) : '';
+  const axes = m.axes.map((a, i) => ({ name: a, i })).filter(a => a.name && !a.name.includes('*'));
+  const tagOrder = [...new Set(entries.flatMap(e => e.tags))];
+  return { byName, order, match, find, axes, tagOrder };
+}
+// "AI, サブスク　仕事" -> ['AI', 'サブスク', '仕事']
+function splitTags(s) {
+  return [...new Set(String(s ?? '').split(/[,、，;；\s#＃]+/).map(t => t.trim()).filter(Boolean))];
+}
+
+// ===== Aggregation =====
+function aggregate(data, mode, title, M = compileMaster()) {
+  const rows = data.map(t => {
+    const name = M.match(t.store) || '';
+    return { ...t, name: name || NO_STORE, reg: !!name && M.byName.has(name) };
+  }).sort((a, b) => a.date.localeCompare(b.date));
+
+  const dates = rows.map(r => r.date);
+  const min = dates[0], max = dates[dates.length - 1];
+  const day = s => Date.UTC(...s.split('-').map((v, i) => i === 1 ? v - 1 : +v));
+  const totalDays = min ? Math.floor((day(max) - day(min)) / 864e5) + 1 : 1;
+  const asOf = max ? `${+max.slice(5, 7)}/${+max.slice(8)}` : '';
+
+  const sumBy = key => { const m = new Map(); for (const r of rows) m.set(key(r), (m.get(key(r)) || 0) + r.amount); return m; };
+  const blocks = [];
+
+  // 1. by card / by MF account
+  const labels = mode === 'card' ? CARD_ZONES.filter(z => rows.some(r => r.label === z)) : [...new Set(rows.map(r => r.label))];
+  if (labels.length) {
+    const s = sumBy(r => r.label);
+    blocks.push({ key: 'label', title: mode === 'card' ? '【カード別集計】' : '【種別集計】', items: labels.map(l => ({ name: l, amount: s.get(l), filter: { label: l } })) });
+  }
+
+  // 2. by store (master order first)
+  const s2 = sumBy(r => r.name);
+  const stores = [...s2.keys()].sort((a, b) => {
+    const ia = M.order.has(a) ? M.order.get(a) : 1e9, ib = M.order.has(b) ? M.order.get(b) : 1e9;
+    return ia - ib || a.localeCompare(b, 'ja');
+  });
+  blocks.push({ key: 'store', title: '【店舗別集計】', items: stores.map(n => ({ name: n, amount: s2.get(n), unreg: !M.byName.has(n), filter: { name: n } })) });
+
+  // 3. per category axis
+  const catOfAxis = (r, i) => String(M.byName.get(r.name)?.cats?.[i] ?? '').trim() || OTHER;
+  for (const ax of M.axes) {
+    if (!M.byName.size) continue;
+    const s3 = sumBy(r => catOfAxis(r, ax.i));
+    const catOrder = new Map(); let k = 0;
+    for (const e of M.byName.values()) { const c = String(e.cats?.[ax.i] ?? '').trim(); if (c && !catOrder.has(c)) catOrder.set(c, k++); }
+    const cats = [...s3.keys()].filter(c => c !== OTHER).sort((a, b) =>
+      (catOrder.get(a) ?? 1e9) - (catOrder.get(b) ?? 1e9) || a.localeCompare(b, 'ja'));
+    const items = cats.map(c => ({ name: c, amount: s3.get(c), filter: { axis: ax.i, cat: c } }));
+    const other = s3.has(OTHER) ? { name: OTHER, amount: s3.get(OTHER), filter: { axis: ax.i, cat: OTHER } } : null;
+    blocks.push({ key: `axis:${ax.name}`, title: `【${ax.name}集計】`, axisName: ax.name, items, other, catOrder });
+  }
+
+  // 4. tags: one store can have many tags, so a line counts toward every tag it has (no grand total).
+  const tagsOf = r => M.byName.get(r.name)?.tags || [];
+  if (M.tagOrder.length) {
+    const s4 = new Map();
+    for (const r of rows) for (const t of tagsOf(r)) s4.set(t, (s4.get(t) || 0) + r.amount);
+    const items = M.tagOrder.filter(t => s4.has(t)).map(t => ({ name: t, amount: s4.get(t), filter: { tag: t } }));
+    blocks.push({ key: 'tags', title: '【タグ集計】', items, noTotal: true });
+  }
+  return { rows, blocks, title, totalDays, asOf, catOfAxis, tagsOf };
+}
+
+// ===== Rendering: statements =====
+function claimsFor(mode) {
+  const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
+  return [...new Set(state.imports.filter(i => srcs.includes(i.source)).map(i => i.claim))].sort().reverse();
+}
+function renderMonthSel(mode) {
+  const claims = claimsFor(mode);
+  if (!claims.includes(sel[mode])) sel[mode] = claims[0] || null;
+  const s = document.getElementById(`month-${mode}`);
+  s.innerHTML = claims.length
+    ? claims.map(c => `<option value="${c}">${claimLabel(c)}${mode === 'card' ? '請求分' : ''}</option>`).join('')
+    : '<option>まだデータがありません</option>';
+  s.disabled = !claims.length;
+  if (sel[mode]) s.value = sel[mode];
+  s.onchange = () => { sel[mode] = s.value; view[mode].pick = null; render(); };
+}
+
+function zoneHTML(id, label, color, mode) {
+  const imp = state.imports.find(i => i.source === id && i.claim === sel[mode]);
+  const txs = imp ? state.tx.filter(t => t.source === id && t.claim === sel[mode]) : null;
+  const total = txs ? txs.reduce((a, t) => a + t.amount, 0) : 0;
+  const kind = imp ? KIND_LABEL[imp.kind] || '' : '';
+  const check = !imp || imp.bill_total == null ? ''
+    : imp.bill_total === Math.round(total) ? '<div class="line ok">ご請求額と一致 ✓</div>'
+    : `<div class="line bad">⚠ ご請求額 ${fmt(imp.bill_total)}円 とズレ</div>`;
+  return `<div class="zone ${txs ? 'has' : ''}" data-zone="${id}" data-mode="${mode}" style="--zc:${color}">
+    <div class="name">${esc(label)}${kind ? ` <span class="muted">${kind}</span>` : ''}</div>
+    <div class="stat">${txs ? `${txs.length}件・${fmt(total)}円` : 'CSVをここにドロップ'}</div>${check}
+    <div class="line">${esc(imp?.file_name || 'クリックでファイル選択')}</div>
+    ${txs ? '<button class="btn clr">この月を消す</button>' : ''}
+    <input type="file" accept=".csv,text/csv" multiple hidden></div>`;
+}
+function wireZones(box) {
+  box.querySelectorAll('.zone').forEach(z => {
+    const id = z.dataset.zone, mode = z.dataset.mode, fi = z.querySelector('input');
+    z.onclick = e => { if (!e.target.closest('.clr')) fi.click(); };
+    fi.onchange = () => { dropInto(id, [...fi.files], z); fi.value = ''; };
+    z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
+    z.ondragleave = () => z.classList.remove('over');
+    z.ondrop = e => { e.preventDefault(); z.classList.remove('over'); dropInto(id, [...e.dataTransfer.files], z); };
+    const clr = z.querySelector('.clr');
+    if (clr) clr.onclick = async () => {
+      if (!confirm(`${id === 'MF' ? 'マネーフォワード' : id} の ${claimLabel(sel[mode])} 分を消しますか？`)) return;
+      try { await deleteStatement(id, sel[mode]); } catch (e) { toast('消せませんでした: ' + (e.message || e)); }
+      render();
+    };
+  });
+}
+
+async function dropInto(id, files, zoneEl) {
+  if (!files.length) return;
+  zoneEl.classList.add('busy');
+  try {
+    if (id === 'MF') {
+      const rows = [];
+      let skipped = 0;
+      for (const f of files) { const p = parseMFCSV(parseCSV(decode(await f.arrayBuffer()))); rows.push(...p.rows); skipped += p.skipped; }
+      if (!rows.length) { toast('マネーフォワード: 取りこめる明細がありませんでした'); return; }
+      rows.forEach(r => { r.source = 'MF'; r.claim = r.date.slice(0, 7); });
+      const claims = [...new Set(rows.map(r => r.claim))].sort();
+      const imports = claims.map(c => {
+        const rs = rows.filter(r => r.claim === c);
+        return { source: 'MF', claim: c, kind: 'mf', bill_total: null, row_sum: Math.round(rs.reduce((a, r) => a + r.amount, 0)), row_count: rs.length, file_name: files.map(f => f.name).join(', ') };
+      });
+      await replaceStatements('MF', claims, rows, imports);
+      sel.mf = claims[claims.length - 1];
+      toast(`マネーフォワード: ${rows.length}件を ${claims.map(claimLabel).join('・')} に保存` + (skipped ? `（対象外の口座 ${skipped}件は除外）` : ''));
+    } else {
+      const byClaim = new Map();
+      for (const f of files) {
+        const p = parseCardCSV(parseCSV(decode(await f.arrayBuffer())), id);
+        if (!p.rows.length) { toast(`${f.name}: 明細の行が見つかりませんでした`); continue; }
+        const claim = claimOf(p, f.name);
+        const g = byClaim.get(claim) || { rows: [], kinds: new Set(), bill: null, files: [] };
+        g.rows.push(...p.rows.map(r => ({ ...r, source: id, claim })));
+        g.kinds.add(p.kind);
+        if (p.billTotal !== null) g.bill = (g.bill || 0) + p.billTotal;
+        g.files.push(f.name);
+        byClaim.set(claim, g);
+      }
+      if (!byClaim.size) return;
+      const claims = [...byClaim.keys()].sort();
+      const rows = [], imports = [];
+      for (const c of claims) {
+        const g = byClaim.get(c);
+        rows.push(...g.rows);
+        const sum = g.rows.reduce((a, r) => a + r.amount, 0);
+        imports.push({ source: id, claim: c, kind: g.kinds.size > 1 ? 'mixed' : [...g.kinds][0], bill_total: g.bill, row_sum: Math.round(sum), row_count: g.rows.length, file_name: g.files.join(', ') });
+      }
+      await replaceStatements(id, claims, rows, imports);
+      sel.card = claims[claims.length - 1];
+      toast(imports.map(i => {
+        const check = i.bill_total == null ? '' : i.bill_total === i.row_sum ? '・ご請求額と一致✓' : `・⚠ご請求額${fmt(i.bill_total)}円とズレ`;
+        return `${id} ${claimLabel(i.claim)}請求分（${KIND_LABEL[i.kind]}）${i.row_count}件${check}`;
+      }).join(' / '));
+    }
+    view.card.pick = view.mf.pick = null;
+  } catch (e) {
+    console.error(e); toast('保存できませんでした: ' + (e.message || e));
+  } finally {
+    zoneEl.classList.remove('busy');
+    render();
+  }
+}
+
+function blockHTML(b, avgHead, totalDays) {
+  const tr = (cls, name, amt, filter, unreg) =>
+    `<tr class="${cls} ${filter ? 'click' : ''} ${unreg ? 'unreg' : ''}" ${filter ? `data-f='${esc(JSON.stringify(filter))}'` : ''}>
+      <td>${esc(name)}</td><td class="n">${fmt(amt)}</td><td class="n">${fmt(Math.round(amt / totalDays))}</td></tr>`;
+  let body = b.items.map(it => tr('', it.name, it.amount, it.filter, it.unreg)).join('');
+  const sub = b.items.reduce((a, it) => a + it.amount, 0);
+  let total = sub;
+  if (b.other) {
+    body += tr('subtotal', `${b.axisName}の合計`, sub);
+    body += tr('other', b.other.name, b.other.amount, b.other.filter);
+    total += b.other.amount;
+  }
+  if (!b.noTotal) body += tr('total', '合計', total);
+  return `<div class="block"><table>
+    <thead><tr><th>${esc(b.title)}</th><th>金額</th><th>${esc(avgHead)}</th></tr></thead>
+    <tbody>${body}</tbody></table>${b.noTotal ? '<div class="muted">1つの明細が複数のタグに入るので、合計は出しません。</div>' : ''}</div>`;
+}
+
+function renderReport(mode) {
+  const box = document.getElementById(`report-${mode}`);
+  const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
+  const data = state.tx.filter(t => srcs.includes(t.source) && t.claim === sel[mode]);
+  if (!data.length) { box.innerHTML = '<p class="muted">上の箱にCSVをドロップすると集計が出ます。</p>'; return; }
+  const title = mode === 'card' ? `【${claimLabel(sel[mode])}請求分】` : `【${claimLabel(sel[mode])}】`;
+  const A = aggregate(data, mode, title);
+  const v = view[mode];
+  const avgHead = A.asOf ? `1日平均 (${A.asOf}時点)` : '1日平均';
+  const unregCount = new Set(A.rows.filter(r => !r.reg).map(r => r.name)).size;
+
+  let list = A.rows;
+  if (v.pick) {
+    const f = v.pick;
+    list = list.filter(r => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
+      (f.axis === undefined || A.catOfAxis(r, f.axis) === f.cat) && (f.tag === undefined || A.tagsOf(r).includes(f.tag)));
+  }
+  if (v.only) list = list.filter(r => !r.reg);
+  if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
+  const pickLabel = v.pick ? (v.pick.label ?? v.pick.name ?? v.pick.cat) : '';
+
+  box.innerHTML = `
+    <div class="titlebar">
+      <h2>${esc(A.title)}</h2>
+      <span class="muted">${A.rows.length}件・${A.totalDays}日間${unregCount ? `・<b style="color:inherit;background:var(--unreg);padding:0 4px;border-radius:4px">未登録の店 ${unregCount}</b>` : ''}</span>
+      <span class="grow"></span>
+      <button class="btn" data-copy="sum">集計をコピー</button>
+      <button class="btn" data-copy="detail">明細をコピー</button>
+      <button class="btn" data-copy="csv">CSVで保存</button>
+    </div>
+    <div class="layout">
+      <div class="card">
+        <div class="filters">
+          <input type="text" placeholder="店名で検索" value="${esc(v.q)}" data-q>
+          <label><input type="checkbox" data-only ${v.only ? 'checked' : ''}> 未登録だけ</label>
+          ${v.pick ? `<span class="chip">${esc(pickLabel)} でしぼりこみ中 <button data-unpick>×</button></span>` : ''}
+          <span class="muted grow" style="text-align:right">${list.length}件・${fmt(list.reduce((a, r) => a + r.amount, 0))}円</span>
+        </div>
+        <div class="scroll"><table class="detail">
+          <thead><tr><th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード種類' : '種別'}</th></tr></thead>
+          <tbody>${list.map(r => `<tr class="${r.reg ? '' : 'unreg'}">
+            <td>${r.date.replace(/-/g, '/')}</td>
+            <td class="store">${esc(r.name)}${r.name !== r.store && r.store ? `<span class="raw">${esc(r.store)}</span>` : ''}${r.reg ? '' : `<button class="reg" data-reg="${esc(r.store)}">＋登録</button>`}</td>
+            <td class="n">${fmt(r.amount)}</td>
+            <td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>
+      <div>${A.blocks.map(b => blockHTML(b, avgHead, A.totalDays)).join('')}
+        <p class="muted">集計表の行をクリックすると、左の明細をしぼりこみます。</p></div>
+    </div>`;
+
+  const qi = box.querySelector('[data-q]');
+  qi.oninput = () => { v.q = qi.value; renderReport(mode); const n = box.querySelector('[data-q]'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+  box.querySelector('[data-only]').onchange = e => { v.only = e.target.checked; renderReport(mode); };
+  const up = box.querySelector('[data-unpick]'); if (up) up.onclick = () => { v.pick = null; renderReport(mode); };
+  box.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => {
+    const f = JSON.parse(tr.dataset.f);
+    v.pick = JSON.stringify(v.pick) === JSON.stringify(f) ? null : f;
+    renderReport(mode);
+  });
+  box.querySelectorAll('[data-reg]').forEach(b => b.onclick = () => registerStores([b.dataset.reg]));
+  box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(A, mode, b.dataset.copy, avgHead));
+}
+
+function blockLines(b, totalDays, avgHead) {
+  const out = [[b.title, '金額', avgHead]];
+  const add = (n, a) => out.push([n, Math.round(a), Math.round(a / totalDays)]);
+  b.items.forEach(it => add(it.name, it.amount));
+  const sub = b.items.reduce((a, it) => a + it.amount, 0);
+  if (b.other) { add(`${b.axisName}の合計`, sub); add(b.other.name, b.other.amount); add('合計', sub + b.other.amount); }
+  else if (!b.noTotal) add('合計', sub);
+  return out;
+}
+function exportReport(A, mode, kind, avgHead) {
+  const lines = [];
+  if (kind === 'detail' || kind === 'csv') {
+    lines.push([A.title], ['利用日', '利用店舗', '金額', mode === 'card' ? 'カード種類' : '種別']);
+    for (const r of A.rows) lines.push([r.date.replace(/-/g, '/'), r.name, r.amount, r.label]);
+    if (kind === 'csv') lines.push([]);
+  }
+  if (kind === 'sum' || kind === 'csv') for (const b of A.blocks) lines.push(...blockLines(b, A.totalDays, avgHead), []);
+  if (kind === 'csv') downloadCSV(lines, `${A.title.replace(/[【】]/g, '')}_${mode === 'card' ? 'カード' : 'MF'}.csv`);
+  else copyText(lines.map(r => r.join('\t')).join('\n'), kind === 'sum' ? '集計をコピーしました（シートに貼れます）' : '明細をコピーしました');
+}
+function downloadCSV(lines, name) {
+  const csv = '﻿' + lines.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copyText(text, msg) {
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast(msg);
+}
+
+// ===== Rendering: trend =====
+let trendLines = [];
+function renderTrend() {
+  const mode = document.getElementById('trendMode').value;
+  const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
+  const span = +document.getElementById('trendSpan').value;
+  let claims = [...new Set(state.tx.filter(t => srcs.includes(t.source)).map(t => t.claim))].sort();
+  if (span) claims = claims.slice(-span);
+  const box = document.getElementById('trendBox');
+  const axisSel = document.getElementById('trendAxis');
+  if (!claims.length) { box.innerHTML = '<p class="muted">まだデータがありません。</p>'; axisSel.innerHTML = ''; trendLines = []; return; }
+
+  const M = compileMaster();
+  const all = aggregate(state.tx.filter(t => srcs.includes(t.source) && claims.includes(t.claim)), mode, '', M);
+  const prevAxis = axisSel.value;
+  // Category axes and tags first: they are what this tab is for.
+  const first = b => b.key.startsWith('axis:') || b.key === 'tags';
+  const opts = [...all.blocks.filter(first), ...all.blocks.filter(b => !first(b))];
+  axisSel.innerHTML = opts.map(b => `<option value="${esc(b.key)}">${esc(b.title.replace(/[【】]/g, ''))}</option>`).join('');
+  axisSel.value = opts.some(b => b.key === prevAxis) ? prevAxis : opts[0].key;
+  const key = axisSel.value;
+  const base = all.blocks.find(b => b.key === key);
+
+  const perMonth = claims.map(c => {
+    const A = aggregate(state.tx.filter(t => srcs.includes(t.source) && t.claim === c), mode, '', M);
+    const b = A.blocks.find(x => x.key === key);
+    const m = new Map();
+    if (b) { b.items.forEach(i => m.set(i.name, i.amount)); if (b.other) m.set(OTHER, b.other.amount); }
+    return m;
+  });
+  const names = base.items.map(i => i.name);
+  const rows = names.map(n => ({ name: n, vals: perMonth.map(m => m.get(n) || 0) }));
+  const sumRow = (label, list, cls) => ({ name: label, vals: claims.map((_, j) => list.reduce((a, r) => a + r.vals[j], 0)), cls });
+  const out = [...rows];
+  if (base.other) {
+    out.push(sumRow(`${base.axisName}の合計`, rows, 'subtotal'));
+    const o = { name: OTHER, vals: perMonth.map(m => m.get(OTHER) || 0) };
+    out.push(o);
+    out.push(sumRow('合計', [...rows, o], 'total'));
+  } else if (!base.noTotal) out.push(sumRow('合計', rows, 'total'));
+
+  const mlabel = c => `${c.slice(2, 4)}/${+c.slice(5)}`;
+  box.innerHTML = `<table class="trend">
+    <thead><tr><th>${esc(base.title)}</th>${claims.map(c => `<th>${mlabel(c)}</th>`).join('')}<th>合計</th><th>月平均</th></tr></thead>
+    <tbody>${out.map(r => {
+      const max = Math.max(...r.vals, 1);
+      const total = r.vals.reduce((a, b) => a + b, 0);
+      return `<tr class="${r.cls || ''}"><td class="name">${esc(r.name)}</td>${r.vals.map((v, j) => {
+        const up = !r.cls && j > 0 && r.vals[j - 1] > 0 && v >= r.vals[j - 1] * 1.2;
+        return `<td class="n ${r.cls ? '' : 'heat'} ${up ? 'up' : ''}" style="--h:${Math.max(0, v) / max}">${v ? fmt(v) : '–'}</td>`;
+      }).join('')}<td class="n"><b>${fmt(total)}</b></td><td class="n">${fmt(total / claims.length)}</td></tr>`;
+    }).join('')}</tbody></table>`;
+  trendLines = [[base.title, ...claims.map(claimLabel), '合計', '月平均'],
+    ...out.map(r => { const t = r.vals.reduce((a, b) => a + b, 0); return [r.name, ...r.vals.map(Math.round), Math.round(t), Math.round(t / claims.length)]; })];
+}
+['trendMode', 'trendAxis', 'trendSpan'].forEach(id => document.getElementById(id).onchange = renderTrend);
+document.getElementById('trendCopy').onclick = () => copyText(trendLines.map(r => r.join('\t')).join('\n'), '推移の表をコピーしました（シートに貼れます）');
+
+// ===== Master editor =====
+function allUnregistered() {
+  const M = compileMaster();
+  const m = new Map();
+  for (const t of state.tx) {
+    const n = M.match(t.store);
+    if (n && !M.byName.has(n)) m.set(t.store.trim(), (m.get(t.store.trim()) || 0) + t.amount);
+  }
+  return [...m.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function registerStores(stores) {
+  const ax = state.master.axes.length;
+  for (const s of stores) state.master.rows.push({ pattern: s, name: s, cats: Array(ax).fill(''), tags: '' });
+  saveMaster();
+  switchTab('master');
+  renderMaster(state.master.rows.length - stores.length);
+  toast(`${stores.length}件をマスタの最後に追加しました。表示名や種別を入れてね`);
+}
+
+function renderMaster(flashFrom) {
+  const m = state.master;
+  const M = compileMaster();
+  const hits = new Map();
+  for (const t of state.tx) { const n = M.match(t.store); hits.set(n, (hits.get(n) || 0) + 1); }
+
+  const unreg = allUnregistered();
+  document.getElementById('unregBox').innerHTML = unreg.length ? `
+    <div class="filters"><b>未登録の店 ${unreg.length}件</b><span class="muted">（クリックでマスタに追加）</span>
+    <button class="btn" id="regAll">ぜんぶ追加</button></div>
+    <div class="unreglist">${unreg.map(([s, a]) => `<button data-s="${esc(s)}">${esc(s)} <span class="muted">${fmt(a)}円</span></button>`).join('')}</div>` : '';
+  document.querySelectorAll('#unregBox [data-s]').forEach(b => b.onclick = () => registerStores([b.dataset.s]));
+  const ra = document.getElementById('regAll'); if (ra) ra.onclick = () => registerStores(unreg.map(u => u[0]));
+
+  const lists = m.axes.map((_, i) => [...new Set(m.rows.map(r => (r.cats?.[i] || '').trim()).filter(Boolean))]);
+  const tbl = document.getElementById('masterTable');
+  tbl.innerHTML = `
+    <thead><tr><th class="ops"></th><th>パターン</th><th>表示名</th>
+      ${m.axes.map((a, i) => `<th><div style="display:flex;align-items:center"><input data-axis="${i}" value="${esc(a)}"><button data-delaxis="${i}" title="この列をけす">×</button></div></th>`).join('')}
+      <th>タグ</th><th class="ops">件数</th><th class="ops"></th></tr></thead>
+    <tbody>${m.rows.map((r, i) => {
+      const name = (r.name || '').trim() || normStore(r.pattern).replace(/\*/g, '');
+      return `<tr data-i="${i}" class="${flashFrom !== undefined && i >= flashFrom ? 'flash' : ''}">
+        <td class="ops"><button data-up="${i}" title="上へ">▲</button><button data-down="${i}" title="下へ">▼</button></td>
+        <td><input data-f="pattern" value="${esc(r.pattern)}"></td>
+        <td><input data-f="name" value="${esc(r.name)}"></td>
+        ${m.axes.map((_, a) => `<td><input data-cat="${a}" list="dl-${a}" value="${esc(r.cats?.[a] || '')}"></td>`).join('')}
+        <td><input data-f="tags" value="${esc(r.tags || '')}" placeholder="AI, 仕事"></td>
+        <td class="hit">${hits.get(name) || ''}</td>
+        <td class="ops"><button data-del="${i}" title="この行をけす">×</button></td></tr>`;
+    }).join('')}</tbody>`;
+  tbl.insertAdjacentHTML('beforeend', lists.map((l, i) => `<datalist id="dl-${i}">${l.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`).join(''));
+
+  tbl.querySelectorAll('tbody input').forEach(inp => inp.oninput = () => {
+    const r = m.rows[+inp.closest('tr').dataset.i];
+    if (inp.dataset.f) r[inp.dataset.f] = inp.value;
+    else { r.cats = r.cats || []; r.cats[+inp.dataset.cat] = inp.value; }
+    saveMaster(); updateBadge();
+  });
+  tbl.querySelectorAll('[data-axis]').forEach(inp => inp.oninput = () => { m.axes[+inp.dataset.axis] = inp.value; saveMaster(); });
+  tbl.querySelectorAll('[data-delaxis]').forEach(b => b.onclick = () => {
+    const i = +b.dataset.delaxis;
+    if (!confirm(`集計軸「${m.axes[i]}」の列をけしますか？`)) return;
+    m.axes.splice(i, 1); m.rows.forEach(r => r.cats?.splice(i, 1)); saveMaster(); renderMaster();
+  });
+  tbl.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { m.rows.splice(+b.dataset.del, 1); saveMaster(); renderMaster(); });
+  const move = (i, d) => { const j = i + d; if (j < 0 || j >= m.rows.length) return; [m.rows[i], m.rows[j]] = [m.rows[j], m.rows[i]]; saveMaster(); renderMaster(); };
+  tbl.querySelectorAll('[data-up]').forEach(b => b.onclick = () => move(+b.dataset.up, -1));
+  tbl.querySelectorAll('[data-down]').forEach(b => b.onclick = () => move(+b.dataset.down, 1));
+
+  if (flashFrom !== undefined) {
+    const tr = tbl.querySelector(`tr[data-i="${flashFrom}"]`);
+    if (tr) { tr.scrollIntoView({ block: 'center' }); tr.querySelector('[data-f="name"]').focus(); }
+  }
+  updateBadge();
+}
+
+function updateBadge() {
+  const n = allUnregistered().length;
+  const b = document.getElementById('unregBadge');
+  b.hidden = !n; b.textContent = n;
+}
+
+document.getElementById('tester').oninput = e => {
+  const s = e.target.value, out = document.getElementById('testerOut');
+  document.querySelectorAll('#masterTable tr.flash').forEach(tr => tr.classList.remove('flash'));
+  if (!s.trim()) { out.textContent = ''; return; }
+  const M = compileMaster(), hit = M.find(s);
+  if (!hit) { out.innerHTML = `→ <b style="background:var(--unreg);padding:0 4px">未登録</b>（「${esc(normStore(s))}」としてくらべました）`; return; }
+  const tags = M.byName.get(hit.name)?.tags || [];
+  out.innerHTML = `→ <b>${esc(hit.name)}</b>（${hit.row + 1}行目・${hit.how}${tags.length ? `・タグ: ${esc(tags.join(', '))}` : ''}）`;
+  const tr = document.querySelector(`#masterTable tr[data-i="${hit.row}"]`);
+  if (tr) { void tr.offsetWidth; tr.classList.add('flash'); tr.scrollIntoView({ block: 'nearest' }); }
+};
+
+document.getElementById('addRow').onclick = () => {
+  state.master.rows.push({ pattern: '', name: '', cats: Array(state.master.axes.length).fill(''), tags: '' });
+  saveMaster(); renderMaster(state.master.rows.length - 1);
+  document.querySelector(`#masterTable tr[data-i="${state.master.rows.length - 1}"] [data-f="pattern"]`).focus();
+};
+document.getElementById('addAxis').onclick = () => {
+  const n = prompt('集計軸の名前（例：用途、だれの）')?.trim();
+  if (!n) return;
+  state.master.axes.push(n); saveMaster(); renderMaster();
+};
+document.getElementById('masterImport').onclick = () => importMasterText(document.getElementById('masterPaste').value);
+document.getElementById('masterFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (f) importMasterText(decode(await f.arrayBuffer()));
+};
+const mp = document.getElementById('pane-master');
+mp.addEventListener('dragover', e => { e.preventDefault(); mp.classList.add('over'); });
+mp.addEventListener('dragleave', e => { if (!mp.contains(e.relatedTarget)) mp.classList.remove('over'); });
+mp.addEventListener('drop', async e => {
+  e.preventDefault(); mp.classList.remove('over');
+  const f = e.dataTransfer.files[0];
+  if (f) importMasterText(decode(await f.arrayBuffer()));
+});
+
+function importMasterText(raw) {
+  const text = raw.replace(/\r/g, '');
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 1) { toast('貼りつけてね'); return; }
+  const sep = lines[0].includes('\t') ? '\t' : ',';
+  const cells = sep === ',' ? parseCSV(text) : lines.map(l => l.split('\t').map(c => c.trim()));
+  // Columns after A/B are category axes, except one headed "タグ" which holds comma-separated tags.
+  const head = cells[0].map(c => c.trim());
+  const tagCol = head.findIndex((h, i) => i >= 2 && h === 'タグ');
+  const axisCols = head.map((h, i) => i).filter(i => i >= 2 && i !== tagCol);
+  while (axisCols.length && !head[axisCols[axisCols.length - 1]]) axisCols.pop();
+  const axes = axisCols.map(i => head[i]);
+  const rows = cells.slice(1).filter(c => (c[0] || '').trim()).map(c => ({
+    pattern: c[0].trim(), name: (c[1] || '').trim(), cats: axisCols.map(i => (c[i] || '').trim()),
+    tags: tagCol >= 0 ? splitTags(c[tagCol]).join(', ') : '',
+  }));
+  if (state.master.rows.length && !confirm(`いまのマスタ（${state.master.rows.length}行）を、読みこんだ${rows.length}行・集計軸 ${axes.length}列で置きかえますか？`)) return;
+  state.master = { axes, rows };
+  document.getElementById('masterPaste').value = '';
+  const used = axes.filter(a => a && !a.includes('*'));
+  saveMaster(); renderMaster(); toast(`マスタを読みこみました（${rows.length}行・集計する軸: ${used.join('、') || 'なし'}）`);
+}
+document.getElementById('masterCopy').onclick = () => {
+  const m = state.master;
+  const lines = [['パターン', '表示名', ...m.axes, 'タグ'], ...m.rows.map(r => [r.pattern, r.name, ...m.axes.map((_, i) => r.cats?.[i] || ''), r.tags || ''])];
+  copyText(lines.map(l => l.join('\t')).join('\n'), 'マスタをコピーしました（シートに貼れます）');
+};
+
+// ===== Tabs & top-level =====
+function switchTab(t) {
+  tab = t;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === `pane-${t}`));
+  render();
+}
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+
+function render() {
+  renderMonthSel('card'); renderMonthSel('mf');
+  const zc = document.getElementById('zones-card');
+  zc.innerHTML = CARD_ZONES.map(z => zoneHTML(z, z, `var(--${z})`, 'card')).join('');
+  wireZones(zc);
+  const zm = document.getElementById('zones-mf');
+  zm.innerHTML = zoneHTML('MF', 'マネーフォワード', 'var(--MF)', 'mf');
+  wireZones(zm);
+  if (tab === 'card') renderReport('card');
+  if (tab === 'mf') renderReport('mf');
+  if (tab === 'trend') renderTrend();
+  if (tab === 'master') renderMaster();
+  renderAccount(); renderNotice(); updateBadge();
+}
+
+// Keep the browser from opening a file dropped outside a zone.
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+
+// ===== Start =====
+if (window.supabase && !SB_KEY.startsWith('__')) {
+  sb = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, storageKey: 'card-summary-auth' } });
+  sb.auth.onAuthStateChange((event, session) => {
+    const next = session?.user || null;
+    if (next?.id === user?.id) return; // token refresh etc.
+    user = next;
+    if (user) cloudLoad();
+    else { state = loadLocal(); cloud = 'off'; sel = { card: null, mf: null }; render(); }
+  });
+}
+render();
+</script>
+</body>
+</html>
