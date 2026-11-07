@@ -77,8 +77,14 @@
   .titlebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
   .titlebar h2 { margin: 0; font-size: 17px; }
 
-  .layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
-  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); gap: 14px; align-items: stretch; }
+  /* Side by side: the lines box grows as tall as the summary column (at least 60% of the screen). */
+  .layout > .card.lines { display: flex; flex-direction: column; margin-bottom: 0; }
+  .layout > .card.lines > .scroll { flex: 1 1 0; min-height: 60vh; max-height: none; }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; align-items: start; }
+    .layout > .card.lines > .scroll { flex: none; min-height: 0; max-height: 70vh; }
+  }
 
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; white-space: nowrap; }
@@ -956,11 +962,11 @@ function blockHTML(b, avgHead, totalDays) {
   const sub = b.items.reduce((a, it) => a + it.amount, 0);
   let total = sub;
   if (b.other) {
-    body += tr('subtotal', `${b.axisName}の合計`, sub);
+    body += tr('subtotal', `${b.axisName}の合計`, sub, b.subtotalFilter);
     body += tr('other', b.other.name, b.other.amount, b.other.filter);
     total += b.other.amount;
   }
-  if (!b.noTotal) body += tr('total', '合計', total);
+  if (!b.noTotal) body += tr('total', '合計', total, b.totalFilter);
   return `<div class="block"><table>
     <thead><tr><th>${esc(b.title)}</th><th>金額</th><th>${esc(avgHead)}</th></tr></thead>
     <tbody>${body}</tbody></table>${b.noTotal ? '<div class="muted">1つの明細が複数のタグに入るので、合計は出しません。</div>' : ''}</div>`;
@@ -994,15 +1000,19 @@ function renderReport(mode) {
   const filterFor = (b, name) => b.key === 'label' ? { label: name } : b.key === 'store' ? { name } : b.key === 'tags' ? { tag: name } : { axisName: b.axisName, cat: name };
   const blocks = shown.blocks.map(b => ({ ...b,
     items: b.items.map(i => ({ ...i, filter: filterFor(b, i.name) })),
-    other: b.other ? { ...b.other, filter: filterFor(b, b.other.name) } : null }));
+    other: b.other ? { ...b.other, filter: filterFor(b, b.other.name) } : null,
+    // "種別1の合計" = every line given a category on that axis (everything except その他); "合計" = all lines.
+    subtotalFilter: b.axisName ? { axisName: b.axisName, notOther: true } : null,
+    totalFilter: { all: true } }));
 
   let list = shown.lines;
   const f = v.pick;
   if (f) list = list.filter(r => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
-    (f.cat === undefined || (r.cats?.[f.axisName] ?? OTHER) === f.cat) && (f.tag === undefined || (r.tags || []).includes(f.tag)));
+    (f.cat === undefined || (r.cats?.[f.axisName] ?? OTHER) === f.cat) && (f.tag === undefined || (r.tags || []).includes(f.tag)) &&
+    (!f.notOther || (r.cats?.[f.axisName] ?? OTHER) !== OTHER));
   if (v.only) list = list.filter(r => !r.reg);
   if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
-  const pickLabel = f ? (f.label ?? f.name ?? f.cat ?? f.tag) : '';
+  const pickLabel = f ? (f.notOther ? `${f.axisName}の合計` : (f.label ?? f.name ?? f.cat ?? f.tag)) : '';
   const classify = r => [...shown.axisNames.map(a => r.cats?.[a]).filter(c => c && c !== OTHER), ...(r.tags || []).map(t => '#' + t)].join('・');
 
   const fileList = list => list.map(i => `${esc(i.source === 'MF' ? 'MF' : i.source)}: ${esc(i.file_name || '')}${KIND_LABEL[i.kind] ? `（${KIND_LABEL[i.kind]}）` : ''}`).join(' ／ ');
@@ -1024,7 +1034,7 @@ function renderReport(mode) {
       <button class="btn" data-copy="csv">CSVで保存</button>
     </div>
     <div class="layout">
-      <div class="card">
+      <div class="card lines">
         <div class="filters">
           <input type="text" placeholder="店名で検索" value="${esc(v.q)}" data-q>
           <label><input type="checkbox" data-only ${v.only ? 'checked' : ''}> 未登録だけ</label>
@@ -1055,7 +1065,7 @@ function renderReport(mode) {
   const up = box.querySelector('[data-unpick]'); if (up) up.onclick = () => { v.pick = null; renderReport(mode); };
   box.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => {
     const f = JSON.parse(tr.dataset.f);
-    v.pick = JSON.stringify(v.pick) === JSON.stringify(f) ? null : f;
+    v.pick = f.all || JSON.stringify(v.pick) === JSON.stringify(f) ? null : f; // "合計" shows every line
     renderReport(mode);
     // On a narrow screen the lines sit above the tables, so bring them into view and flash them.
     const card = box.querySelector('table.detail')?.closest('.card');
