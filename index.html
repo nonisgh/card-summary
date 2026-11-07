@@ -182,6 +182,7 @@
         <select id="dbTag"></select>
         <input type="text" id="dbQ" placeholder="店名で検索（例：ANTHROPIC）">
         <span class="grow"></span>
+        <button class="btn" id="dbDel" disabled>🗑 選んだ明細を消す</button>
         <button class="btn" id="dbCopy">コピー</button><button class="btn" id="dbCsv">CSVで保存</button>
       </div>
       <div class="muted" id="dbSum"></div>
@@ -278,7 +279,7 @@ let snapsMissing = false; // signed in, but the cc_snapshots table has not been 
 function loadLocal() {
   try {
     const v = JSON.parse(localStorage.getItem(KEY));
-    if (v) return { ...emptyState(), ...v };
+    if (v) { const s = { ...emptyState(), ...v }; ensureKeys(s.tx); return s; }
     const old = JSON.parse(localStorage.getItem('card-summary-v1')); // earlier version: keep the master
     if (old?.master) return { ...emptyState(), master: old.master };
   } catch {}
@@ -402,7 +403,13 @@ function parseMFCSV(rows) {
 }
 
 // ===== Storage (local or Supabase) =====
+// Every line gets a key so it can be picked out (to delete it). Cloud lines use their database id.
+// (function declarations, not consts: loadLocal() calls this before this point in the file runs)
+function newKey() { return 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function ensureKeys(list) { for (const t of list) if (!t.k) t.k = t.id ? 'id' + t.id : newKey(); return list; }
+
 function applyReplace(source, claims, rows, imports) {
+  ensureKeys(rows);
   state.tx = state.tx.filter(t => !(t.source === source && claims.includes(t.claim))).concat(rows);
   state.imports = state.imports.filter(i => !(i.source === source && claims.includes(i.claim))).concat(imports);
 }
@@ -415,11 +422,15 @@ async function replaceStatements(source, claims, rows, imports) {
       p_imports: imports,
     });
     if (error) { setCloud('err'); throw error; }
+    // Read the stored lines back so they carry their database ids (needed to delete single lines).
+    const back = await sb.from('cc_tx').select('id,source,claim,label,use_date,store,amount').eq('source', source).in('claim', claims).order('id');
+    if (!back.error) rows = back.data.map(fromDb);
     setCloud('on');
   }
   applyReplace(source, claims, rows, imports);
   saveLocal();
 }
+const fromDb = r => ({ id: r.id, k: 'id' + r.id, source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount });
 async function deleteStatement(source, claim) {
   if (user) {
     setCloud('busy');
@@ -498,9 +509,9 @@ async function cloudLoad(keepView = false) {
     if (im.error) throw im.error;
     const tx = [];
     for (let from = 0; ; from += 1000) { // PostgREST returns at most 1000 rows per request
-      const { data, error } = await sb.from('cc_tx').select('source,claim,label,use_date,store,amount').order('id').range(from, from + 999);
+      const { data, error } = await sb.from('cc_tx').select('id,source,claim,label,use_date,store,amount').order('id').range(from, from + 999);
       if (error) throw error;
-      tx.push(...data.map(r => ({ source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount })));
+      tx.push(...data.map(fromDb));
       if (data.length < 1000) break;
     }
     // Saved summaries live in a table added later; the app still works if it does not exist yet.
@@ -700,7 +711,7 @@ function aggregate(data, mode, title, M = compileMaster()) {
   // Each line with its classification, in the same shape a saved month keeps.
   const axisNames = M.axes.map(a => a.name);
   const lines = rows.map(r => ({
-    date: r.date, store: r.store, name: r.name, amount: r.amount, label: r.label, reg: r.reg, claim: r.claim, source: r.source,
+    date: r.date, store: r.store, name: r.name, amount: r.amount, label: r.label, reg: r.reg, claim: r.claim, source: r.source, k: r.k,
     cats: Object.fromEntries(M.axes.map(a => [a.name, catOfAxis(r, a.i)])), tags: tagsOf(r),
   }));
   return { rows, lines, axisNames, blocks, title, totalDays, asOf, catOfAxis, tagsOf };
@@ -1133,6 +1144,8 @@ function renderDB() {
   const keep = (sel, opts, fallback) => { const v = sel.value; sel.innerHTML = opts; sel.value = [...sel.options].some(o => o.value === v) ? v : fallback; };
   const monthOpts = claims.map(c => `<option value="${c}">${claimLabel(c)}</option>`).join('');
   keep($('dbFrom'), monthOpts, claims[0] || ''); keep($('dbTo'), monthOpts, claims[claims.length - 1] || '');
+  // Until the period is picked by hand it always covers every month, so newly added months are never hidden.
+  if (!dbRangeSet) { $('dbFrom').value = claims[0] || ''; $('dbTo').value = claims[claims.length - 1] || ''; }
   keep($('dbCard'), `<option value="">${mode === 'card' ? 'すべてのカード' : 'すべての種別'}</option>` +
     [...new Set(all.lines.map(r => r.label))].map(l => `<option>${esc(l)}</option>`).join(''), '');
   keep($('dbAxis'), `<option value="">種別でしぼらない</option>` + all.axisNames.map(a => `<option>${esc(a)}</option>`).join(''), '');
@@ -1154,23 +1167,92 @@ function renderDB() {
   const total = list.reduce((a, r) => a + r.amount, 0);
   const months = [...new Set(list.map(r => r.claim))];
   $('dbSum').textContent = list.length ? `${list.length}件・${fmt(total)}円（${months.length}か月・月平均 ${fmt(total / months.length)}円）` : '';
+  // Selection only keeps lines that are still shown.
+  const shownKeys = new Set(list.map(r => r.k));
+  for (const k of [...dbSel]) if (!shownKeys.has(k)) dbSel.delete(k);
+  const updDel = () => { $('dbDel').disabled = !dbSel.size; $('dbDel').textContent = dbSel.size ? `🗑 選んだ明細を消す（${dbSel.size}件）` : '🗑 選んだ明細を消す'; };
+  updDel();
   if (!list.length) { $('dbBox').innerHTML = '<p class="muted">あてはまる明細がありません。</p>'; return; }
   const classify = r => [...all.axisNames.map(a => r.cats[a]).filter(c => c && c !== OTHER), ...r.tags.map(t => '#' + t)].join('・');
+  const checked = keys => keys.length && keys.every(k => dbSel.has(k));
   let html = '', cur = null;
   for (const r of list) {
     if (r.claim !== cur) {
       cur = r.claim;
       const ms = list.filter(x => x.claim === cur);
-      html += `<tr class="month"><td colspan="3">${claimLabel(cur)}${mode === 'card' ? '請求分' : ''}（${ms.length}件）</td><td class="n">${fmt(ms.reduce((a, x) => a + x.amount, 0))}</td><td colspan="2"></td></tr>`;
+      html += `<tr class="month"><td><label><input type="checkbox" data-month="${cur}" ${checked(ms.map(x => x.k)) ? 'checked' : ''}> この月</label></td>
+        <td colspan="2">${claimLabel(cur)}${mode === 'card' ? '請求分' : ''}（${ms.length}件）</td><td class="n">${fmt(ms.reduce((a, x) => a + x.amount, 0))}</td><td colspan="2"></td></tr>`;
     }
-    html += `<tr class="${r.reg ? '' : 'unreg'}"><td></td><td>${r.date.replace(/-/g, '/')}</td>
+    html += `<tr class="${r.reg ? '' : 'unreg'}"><td style="text-align:center"><input type="checkbox" data-k="${r.k}" ${dbSel.has(r.k) ? 'checked' : ''}></td><td>${r.date.replace(/-/g, '/')}</td>
       <td class="store">${esc(r.name)}${r.name !== r.store && r.store ? `<span class="raw">${esc(r.store)}</span>` : ''}</td>
       <td class="n">${fmt(r.amount)}</td><td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td>
       <td class="muted" style="white-space:normal">${esc(classify(r))}</td></tr>`;
   }
-  $('dbBox').innerHTML = `<table class="detail db"><thead><tr><th>${mode === 'card' ? '請求月' : '利用月'}</th><th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード' : '種別'}</th><th>分類</th></tr></thead><tbody>${html}</tbody></table>`;
+  $('dbBox').innerHTML = `<table class="detail db"><thead><tr>
+    <th><label title="表示している明細をぜんぶ選ぶ"><input type="checkbox" data-allk ${checked([...shownKeys]) ? 'checked' : ''}> ${mode === 'card' ? '請求月' : '利用月'}</label></th>
+    <th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード' : '種別'}</th><th>分類</th></tr></thead><tbody>${html}</tbody></table>`;
+  const box = $('dbBox');
+  box.querySelectorAll('[data-k]').forEach(c => c.onchange = () => { c.checked ? dbSel.add(c.dataset.k) : dbSel.delete(c.dataset.k); renderDB(); });
+  box.querySelectorAll('[data-month]').forEach(c => c.onchange = () => {
+    for (const r of list) if (r.claim === c.dataset.month) c.checked ? dbSel.add(r.k) : dbSel.delete(r.k);
+    renderDB();
+  });
+  box.querySelector('[data-allk]').onchange = e => { for (const k of shownKeys) e.target.checked ? dbSel.add(k) : dbSel.delete(k); renderDB(); };
 }
-['dbSrc', 'dbFrom', 'dbTo', 'dbCard', 'dbAxis', 'dbCat', 'dbTag'].forEach(id => document.getElementById(id).onchange = renderDB);
+const dbSel = new Set();
+document.getElementById('dbDel').onclick = () => deleteLines(new Set(dbSel));
+
+// Delete chosen lines (fixing a file put in by mistake). Each affected month's totals are updated.
+// A month left with no lines loses its record too, so the mistaken data does not live on there.
+async function deleteLines(keys) {
+  const del = state.tx.filter(t => keys.has(t.k));
+  if (!del.length) return;
+  const pairs = [...new Set(del.map(t => `${t.source}|${t.claim}`))].map(p => p.split('|'));
+  const emptied = pairs.filter(([s, c]) => !state.tx.some(t => t.source === s && t.claim === c && !keys.has(t.k)));
+  const modeOf = s => s === 'MF' ? 'mf' : 'card';
+  const emptyMonths = [...new Set(emptied.map(([s, c]) => `${modeOf(s)}|${c}`))]
+    .filter(mc => { const [m, c] = mc.split('|'); return !state.tx.some(t => modeOf(t.source) === m && t.claim === c && !keys.has(t.k)); });
+  const total = del.reduce((a, t) => a + t.amount, 0);
+  if (!confirm(`選んだ明細 ${del.length}件（${fmt(total)}円）を消しますか？` +
+      (emptyMonths.length ? `\n${emptyMonths.map(mc => claimLabel(mc.split('|')[1])).join('・')} は明細がなくなるので、その月の記録も消えます。` : '') +
+      '\n（同じCSVをもう一度入れると、もどります）')) return;
+  try {
+    if (user) {
+      setCloud('busy');
+      const ids = del.map(t => t.id).filter(Boolean);
+      if (ids.length !== del.length) throw new Error('読みこみなおしが必要です（右上の🔄をおしてから、もう一度）');
+      for (let i = 0; i < ids.length; i += 200) {
+        const { error } = await sb.from('cc_tx').delete().in('id', ids.slice(i, i + 200));
+        if (error) throw error;
+      }
+    }
+    state.tx = state.tx.filter(t => !keys.has(t.k));
+    // Fix each affected statement's count/sum, or drop it if nothing is left.
+    for (const [s, c] of pairs) {
+      const rs = state.tx.filter(t => t.source === s && t.claim === c);
+      const imp = state.imports.find(i => i.source === s && i.claim === c);
+      if (!imp) continue;
+      if (rs.length) {
+        Object.assign(imp, { row_count: rs.length, row_sum: Math.round(rs.reduce((a, t) => a + t.amount, 0)) });
+        if (user) { const { error } = await sb.from('cc_imports').update({ row_count: imp.row_count, row_sum: imp.row_sum }).eq('source', s).eq('claim', c); if (error) throw error; }
+      } else {
+        state.imports = state.imports.filter(i => i !== imp);
+        if (user) { const { error } = await sb.from('cc_imports').delete().eq('source', s).eq('claim', c); if (error) throw error; }
+      }
+    }
+    for (const mc of emptyMonths) { const [m, c] = mc.split('|'); if ((state.snapshots || []).some(x => x.mode === m && x.claim === c)) await deleteSnapshot(m, c); }
+    if (user) setCloud('on');
+    saveLocal();
+    for (const m of ['card', 'mf']) await autoRecord(m, [...new Set(pairs.filter(([s]) => modeOf(s) === m).map(([, c]) => c))]);
+    dbSel.clear();
+    toast(`${del.length}件の明細を消しました`);
+  } catch (e) { console.error(e); setCloud('err'); toast('消せませんでした: ' + (e.message || e)); }
+  render();
+}
+['dbSrc', 'dbCard', 'dbAxis', 'dbCat', 'dbTag'].forEach(id => document.getElementById(id).onchange = renderDB);
+var dbRangeSet = false; // var: read by renderDB, which can run before this line on first load
+['dbFrom', 'dbTo'].forEach(id => document.getElementById(id).onchange = () => { dbRangeSet = true; renderDB(); });
+document.getElementById('dbSrc').addEventListener('change', () => { dbRangeSet = false; renderDB(); });
 
 // Wipe data in bulk (e.g. after trying things out). Needs the word "けす" typed, so it cannot happen by a stray click.
 // "card"/"mf": all lines of that kind; the month records stay so months remain viewable. "all": lines and records.
