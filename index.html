@@ -106,6 +106,14 @@
   .block tr.unreg td:first-child { background: var(--unreg); }
   .block tr.click { cursor: pointer; }
   .block tr.click:hover td { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .block input.pk { margin: 0 6px 0 0; vertical-align: middle; cursor: pointer; }
+  .block tr.picked td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .sumbox { border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 14px; }
+  .sumbox.on { border: 2px solid var(--accent); background: var(--card); position: sticky; top: 8px; z-index: 2; }
+  .sumhead { font-weight: 700; font-size: 13px; }
+  .sumbig { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; margin: 2px 0 6px; }
+  .sumbig small { font-size: 14px; margin-left: 2px; }
+  .sumparts { display: flex; flex-wrap: wrap; gap: 6px; }
 
   .trend th { background: var(--head); text-align: center; position: sticky; top: 0; }
   .trend td.name { position: sticky; left: 0; background: var(--card); }
@@ -784,7 +792,7 @@ function renderMonthSel(mode) {
       return `<button data-m="${c}" ${has ? '' : 'disabled'} class="${c === sel[mode] ? 'on' : ''} ${has && !dataHere ? 'saved' : ''}"
         title="${claimLabel(c)}${mode === 'card' ? '請求分' : ''}${has && !dataHere ? '（記録だけ残っています）' : ''}">${i + 1}月</button>`;
     }).join('') + `<span class="muted">${mode === 'card' ? '請求月' : '利用月'}</span>`;
-  const go = c => { sel[mode] = c; view[mode].pick = null; view[mode].snap = false; render(); };
+  const go = c => { sel[mode] = c; view[mode].pick = null; view[mode].multi = []; view[mode].snap = false; render(); };
   box.querySelector('[data-year]').onchange = e => go(claims.filter(c => c.startsWith(e.target.value))[0]);
   box.querySelectorAll('[data-m]').forEach(b => b.onclick = () => go(b.dataset.m));
   renderAdmin(mode);
@@ -965,10 +973,15 @@ async function importCardFiles(id, files) {
   }));
 }
 
-function blockHTML(b, avgHead, totalDays) {
-  const tr = (cls, name, amt, filter, unreg) =>
-    `<tr class="${cls} ${filter ? 'click' : ''} ${unreg ? 'unreg' : ''}" ${filter ? `data-f='${esc(JSON.stringify(filter))}'` : ''}>
-      <td>${esc(name)}</td><td class="n">${fmt(amt)}</td><td class="n">${fmt(Math.round(amt / totalDays))}</td></tr>`;
+// picked: Set of filter JSON strings chosen for "えらんで合計" (rows get a checkbox), or null for no checkboxes.
+function blockHTML(b, avgHead, totalDays, picked = null) {
+  const tr = (cls, name, amt, filter, unreg) => {
+    const fj = filter ? JSON.stringify(filter) : '';
+    const box = picked && filter && !filter.all
+      ? `<input type="checkbox" class="pk" data-pf='${esc(fj)}' ${picked.has(fj) ? 'checked' : ''} title="えらんで合計に入れる">` : '';
+    return `<tr class="${cls} ${filter ? 'click' : ''} ${unreg ? 'unreg' : ''} ${picked?.has(fj) ? 'picked' : ''}" ${filter ? `data-f='${esc(fj)}'` : ''}>
+      <td>${box}${esc(name)}</td><td class="n">${fmt(amt)}</td><td class="n">${fmt(Math.round(amt / totalDays))}</td></tr>`;
+  };
   let body = b.items.map(it => tr('', it.name, it.amount, it.filter, it.unreg)).join('');
   const sub = b.items.reduce((a, it) => a + it.amount, 0);
   let total = sub;
@@ -1016,14 +1029,27 @@ function renderReport(mode) {
     subtotalFilter: b.axisName ? { axisName: b.axisName, notOther: true } : null,
     totalFilter: { all: true } }));
 
+  const matchF = (r, f) => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
+    (f.cat === undefined || (r.cats?.[f.axisName] ?? OTHER) === f.cat) && (f.tag === undefined || (r.tags || []).includes(f.tag)) &&
+    (!f.notOther || (r.cats?.[f.axisName] ?? OTHER) !== OTHER);
+  const labelOf = f => f.notOther ? `${f.axisName}の合計` : f.cat !== undefined ? (f.cat === OTHER ? `${f.axisName}：その他` : f.cat) : f.tag !== undefined ? `#${f.tag}` : (f.label ?? f.name);
+
+  // "えらんで合計": several rows from any tables. Lines matching any of them are combined, so a line that
+  // fits two picks (e.g. VISA and 映画) is counted once.
+  v.multi = (v.multi || []);
+  const multi = v.multi.map(s => JSON.parse(s));
+  const multiLines = multi.length ? shown.lines.filter(r => multi.some(f => matchF(r, f))) : [];
+  const multiTotal = multiLines.reduce((a, r) => a + r.amount, 0);
+  const multiParts = multi.map(f => { const ls = shown.lines.filter(r => matchF(r, f)); return { f, label: labelOf(f), n: ls.length, amount: ls.reduce((a, r) => a + r.amount, 0) }; });
+  const overlap = multiParts.reduce((a, p) => a + p.amount, 0) !== multiTotal;
+
   let list = shown.lines;
   const f = v.pick;
-  if (f) list = list.filter(r => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
-    (f.cat === undefined || (r.cats?.[f.axisName] ?? OTHER) === f.cat) && (f.tag === undefined || (r.tags || []).includes(f.tag)) &&
-    (!f.notOther || (r.cats?.[f.axisName] ?? OTHER) !== OTHER));
+  if (multi.length) list = multiLines;
+  else if (f) list = list.filter(r => matchF(r, f));
   if (v.only) list = list.filter(r => !r.reg);
   if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
-  const pickLabel = f ? (f.notOther ? `${f.axisName}の合計` : (f.label ?? f.name ?? f.cat ?? f.tag)) : '';
+  const pickLabel = f ? labelOf(f) : '';
   const classify = r => [...shown.axisNames.map(a => r.cats?.[a]).filter(c => c && c !== OTHER), ...(r.tags || []).map(t => '#' + t)].join('・');
 
   const fileList = list => list.map(i => `${esc(i.source === 'MF' ? 'MF' : i.source)}: ${esc(i.file_name || '')}${KIND_LABEL[i.kind] ? `（${KIND_LABEL[i.kind]}）` : ''}`).join(' ／ ');
@@ -1049,7 +1075,8 @@ function renderReport(mode) {
         <div class="filters">
           <input type="text" placeholder="店名で検索" value="${esc(v.q)}" data-q>
           <label><input type="checkbox" data-only ${v.only ? 'checked' : ''}> 未登録だけ</label>
-          ${v.pick ? `<span class="chip">${esc(pickLabel)} でしぼりこみ中 <button data-unpick>×</button></span>` : ''}
+          ${multi.length ? `<span class="chip">🧮 えらんだ ${multi.length}こ でしぼりこみ中 <button data-multiclear>×</button></span>`
+            : v.pick ? `<span class="chip">${esc(pickLabel)} でしぼりこみ中 <button data-unpick>×</button></span>` : ''}
           <span class="muted grow" style="text-align:right">${list.length}件・${fmt(list.reduce((a, r) => a + r.amount, 0))}円</span>
         </div>
         <div class="scroll"><table class="detail">
@@ -1066,17 +1093,42 @@ function renderReport(mode) {
           もう一度CSVを入れると、ふつうの月にもどります。
           ${snap.data.files?.length ? `<div class="muted" style="margin-top:4px">入れていたファイル：${fileList(snap.data.files)}</div>` : ''}
           ${hasSavedLines ? '' : '<div class="muted" style="margin-top:4px">⚠ この記録は古い形なので、集計表しか入っていません。</div>'}</div>` : ''}
-        ${blocks.map(b => blockHTML(b, shownAvg, shown.totalDays)).join('')}
-        <p class="muted">集計表の行をクリックすると、左の明細をしぼりこみます。</p></div>
+        <div class="sumbox ${multi.length ? 'on' : ''}">
+          ${multi.length ? `
+            <div class="sumhead">🧮 えらんだものの合計</div>
+            <div class="sumbig">${fmt(multiTotal)}<small>円</small> <span class="muted">${multiLines.length}件・1日平均 ${fmt(Math.round(multiTotal / shown.totalDays))}円</span></div>
+            <div class="sumparts">${multiParts.map((p, i) => `<span class="chip">${esc(p.label)} ${fmt(p.amount)}円 <button data-unmulti="${i}" title="はずす">×</button></span>`).join('')}</div>
+            ${overlap ? '<div class="muted">かさなっている明細（どちらにも入るもの）は1回だけ数えています。</div>' : ''}
+            <div class="filters" style="margin:6px 0 0"><button class="btn" data-multicopy>コピー</button><button class="btn" data-multiclear>ぜんぶはずす</button></div>`
+          : `<div class="muted">🧮 <b>えらんで合計</b>：集計表の行の ☐ にチェックすると、えらんだものだけの合計を出します（ちがう表からでも、いくつでも）。</div>`}
+        </div>
+        ${blocks.map(b => blockHTML(b, shownAvg, shown.totalDays, new Set(v.multi))).join('')}
+        <p class="muted">集計表の行をクリックすると、左の明細をその行だけにしぼりこみます。</p></div>
     </div>`;
 
   const qi = box.querySelector('[data-q]');
   qi.oninput = () => { v.q = qi.value; renderReport(mode); const n = box.querySelector('[data-q]'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
   box.querySelector('[data-only]').onchange = e => { v.only = e.target.checked; renderReport(mode); };
   const up = box.querySelector('[data-unpick]'); if (up) up.onclick = () => { v.pick = null; renderReport(mode); };
+  // えらんで合計
+  box.querySelectorAll('input.pk').forEach(c => {
+    c.onclick = e => e.stopPropagation(); // ticking must not also trigger the row's single filter
+    c.onchange = () => {
+      const s = c.dataset.pf;
+      v.multi = c.checked ? [...v.multi, s] : v.multi.filter(x => x !== s);
+      v.pick = null;
+      renderReport(mode);
+    };
+  });
+  box.querySelectorAll('[data-unmulti]').forEach(b => b.onclick = () => { v.multi.splice(+b.dataset.unmulti, 1); renderReport(mode); });
+  box.querySelectorAll('[data-multiclear]').forEach(b => b.onclick = () => { v.multi = []; renderReport(mode); });
+  const mc = box.querySelector('[data-multicopy]'); if (mc) mc.onclick = () => copyText(
+    [[A.title, 'えらんだものの合計'], ...multiParts.map(p => [p.label, Math.round(p.amount)]), ['合計（かさなりは1回）', Math.round(multiTotal)]].map(r => r.join('\t')).join('\n'),
+    'えらんだものの合計をコピーしました');
   box.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => {
     const f = JSON.parse(tr.dataset.f);
     v.pick = f.all || JSON.stringify(v.pick) === JSON.stringify(f) ? null : f; // "合計" shows every line
+    v.multi = []; // a plain row click is a single filter
     renderReport(mode);
     // On a narrow screen the lines sit above the tables, so bring them into view and flash them.
     const card = box.querySelector('table.detail')?.closest('.card');
