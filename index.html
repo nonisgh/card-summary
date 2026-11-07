@@ -108,6 +108,8 @@
   .master td.ops, .master th.ops { width: 1%; white-space: nowrap; text-align: center; }
   .master td.ops button, .master th button { border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 2px 4px; }
   .master tr.flash td { animation: flash 1.6s; }
+  .card.flash { animation: cardflash 1.2s; }
+  @keyframes cardflash { 0%, 30% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
   @keyframes flash { 0%, 40% { background: var(--unreg); } }
   .master td.hit { font-size: 11px; color: var(--muted); text-align: right; }
   textarea { width: 100%; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); font-family: ui-monospace, monospace; font-size: 12px; }
@@ -408,19 +410,24 @@ async function deleteSnapshot(mode, claim) {
   state.snapshots = (state.snapshots || []).filter(s => !(s.mode === mode && s.claim === claim));
   saveLocal();
 }
-// What gets saved: the summary tables only, with amounts rounded. Detail lines stay in cc_tx.
-function snapshotOf(A) {
+// What gets saved: everything needed to look back at the month later, exactly as it was —
+// the summary tables, every line with how it was classified, and which CSV files went in.
+function snapshotOf(A, files = []) {
   return {
+    v: 2,
     title: A.title, totalDays: A.totalDays, asOf: A.asOf, rowCount: A.rows.length,
     total: Math.round(A.rows.reduce((a, r) => a + r.amount, 0)),
+    axes: A.axisNames,
     blocks: A.blocks.map(b => ({
       key: b.key, title: b.title, axisName: b.axisName || null, noTotal: !!b.noTotal,
-      items: b.items.map(i => ({ name: i.name, amount: Math.round(i.amount) })),
+      items: b.items.map(i => ({ name: i.name, amount: Math.round(i.amount), ...(i.unreg ? { unreg: true } : {}) })),
       other: b.other ? { name: b.other.name, amount: Math.round(b.other.amount) } : null,
     })),
+    rows: A.lines.map(r => ({ ...r, amount: Math.round(r.amount) })),
+    files: files.map(i => ({ source: i.source, file_name: i.file_name, kind: i.kind, bill_total: i.bill_total, row_count: i.row_count })),
   };
 }
-const snapSig = d => JSON.stringify(d.blocks.map(b => [b.title, b.items.map(i => [i.name, i.amount]), b.other && b.other.amount]));
+const snapSig = d => JSON.stringify([d.rowCount, d.total, d.blocks.map(b => [b.title, b.items.map(i => [i.name, i.amount]), b.other && b.other.amount])]);
 const fmtTime = iso => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${pad2(d.getMinutes())}`; };
 
 async function cloudLoad() {
@@ -619,7 +626,13 @@ function aggregate(data, mode, title, M = compileMaster()) {
     const items = M.tagOrder.filter(t => s4.has(t)).map(t => ({ name: t, amount: s4.get(t), filter: { tag: t } }));
     blocks.push({ key: 'tags', title: '【タグ集計】', items, noTotal: true });
   }
-  return { rows, blocks, title, totalDays, asOf, catOfAxis, tagsOf };
+  // Each line with its classification, in the same shape a saved month keeps.
+  const axisNames = M.axes.map(a => a.name);
+  const lines = rows.map(r => ({
+    date: r.date, store: r.store, name: r.name, amount: r.amount, label: r.label, reg: r.reg,
+    cats: Object.fromEntries(M.axes.map(a => [a.name, catOfAxis(r, a.i)])), tags: tagsOf(r),
+  }));
+  return { rows, lines, axisNames, blocks, title, totalDays, asOf, catOfAxis, tagsOf };
 }
 
 // ===== Rendering: statements =====
@@ -780,39 +793,47 @@ function renderReport(mode) {
   const title = mode === 'card' ? `【${claimLabel(sel[mode])}請求分】` : `【${claimLabel(sel[mode])}】`;
   const A = aggregate(data, mode, title);
   const v = view[mode];
-  const avgHead = A.asOf ? `1日平均 (${A.asOf}時点)` : '1日平均';
   const unregCount = new Set(A.rows.filter(r => !r.reg).map(r => r.name)).size;
 
-  let list = A.rows;
-  if (v.pick) {
-    const f = v.pick;
-    list = list.filter(r => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
-      (f.axis === undefined || A.catOfAxis(r, f.axis) === f.cat) && (f.tag === undefined || A.tagsOf(r).includes(f.tag)));
-  }
-  if (v.only) list = list.filter(r => !r.reg);
-  if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
-  const pickLabel = v.pick ? (v.pick.label ?? v.pick.name ?? v.pick.cat) : '';
-
-  // Saved summary for this month (if any), and whether today's numbers still match it.
+  // Saved month (if any), and whether today's numbers still match it.
   const snap = (state.snapshots || []).find(s => s.mode === mode && s.claim === sel[mode]);
-  const now = snapshotOf(A);
+  const files = state.imports.filter(i => srcs.includes(i.source) && i.claim === sel[mode]);
+  const now = snapshotOf(A, files);
   const same = snap ? snapSig(snap.data) === snapSig(now) : false;
   const showSnap = !!(snap && v.snap);
+  const hasSavedLines = !!snap?.data.rows; // saves made before lines were included have only the tables
   const shown = showSnap
-    ? { ...A, blocks: snap.data.blocks, totalDays: snap.data.totalDays, asOf: snap.data.asOf }
+    ? { title: A.title, rows: hasSavedLines ? snap.data.rows : A.lines, lines: hasSavedLines ? snap.data.rows : A.lines,
+        axisNames: snap.data.axes || A.axisNames, blocks: snap.data.blocks, totalDays: snap.data.totalDays, asOf: snap.data.asOf }
     : A;
   const shownAvg = shown.asOf ? `1日平均 (${shown.asOf}時点)` : '1日平均';
+  // Clicking a summary row filters the lines; works the same for today's and the saved tables.
+  const filterFor = (b, name) => b.key === 'label' ? { label: name } : b.key === 'store' ? { name } : b.key === 'tags' ? { tag: name } : { axisName: b.axisName, cat: name };
+  const blocks = shown.blocks.map(b => ({ ...b,
+    items: b.items.map(i => ({ ...i, filter: filterFor(b, i.name) })),
+    other: b.other ? { ...b.other, filter: filterFor(b, b.other.name) } : null }));
+
+  let list = shown.lines;
+  const f = v.pick;
+  if (f) list = list.filter(r => (f.label === undefined || r.label === f.label) && (f.name === undefined || r.name === f.name) &&
+    (f.cat === undefined || (r.cats?.[f.axisName] ?? OTHER) === f.cat) && (f.tag === undefined || (r.tags || []).includes(f.tag)));
+  if (v.only) list = list.filter(r => !r.reg);
+  if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
+  const pickLabel = f ? (f.label ?? f.name ?? f.cat ?? f.tag) : '';
+  const classify = r => [...shown.axisNames.map(a => r.cats?.[a]).filter(c => c && c !== OTHER), ...(r.tags || []).map(t => '#' + t)].join('・');
+
+  const fileList = list => list.map(i => `${esc(i.source === 'MF' ? 'MF' : i.source)}: ${esc(i.file_name || '')}${KIND_LABEL[i.kind] ? `（${KIND_LABEL[i.kind]}）` : ''}`).join(' ／ ');
   const snapBar = snap
-    ? `<span class="chip" style="background:${same ? 'var(--head)' : 'var(--unreg)'}">💾 ${fmtTime(snap.saved_at)} に保存ずみ・${same ? 'いまと同じ数字' : '⚠ いまの集計と数字がちがう'}</span>
-       <button class="btn" data-snap-view>${showSnap ? 'いまの集計を見る' : '保存した集計を見る'}</button>
+    ? `<span class="chip" style="background:${same ? 'var(--head)' : 'var(--unreg)'}">💾 ${fmtTime(snap.saved_at)} に保存ずみ・${same ? 'いまと同じ' : '⚠ いまとちがう'}</span>
+       <button class="btn" data-snap-view>${showSnap ? 'いまのデータを見る' : '保存したときを見る'}</button>
        <button class="btn" data-snap-save>保存しなおす</button>
-       <button class="btn" data-snap-del title="保存した集計を消す">🗑</button>`
-    : `<button class="btn primary" data-snap-save ${snapsMissing ? 'disabled title="保存用のテーブルがまだありません（SQLを流してね）"' : ''}>💾 この月の集計を保存</button>`;
+       <button class="btn" data-snap-del title="保存したデータを消す">🗑</button>`
+    : `<button class="btn primary" data-snap-save ${snapsMissing ? 'disabled title="保存用のテーブルがまだありません（SQLを流してね）"' : ''}>💾 この月をまるごと保存</button>`;
 
   box.innerHTML = `
     <div class="titlebar">
       <h2>${esc(A.title)}</h2>
-      <span class="muted">${A.rows.length}件・${A.totalDays}日間${unregCount ? `・<b style="color:inherit;background:var(--unreg);padding:0 4px;border-radius:4px">未登録の店 ${unregCount}</b>` : ''}</span>
+      <span class="muted">${shown.lines.length}件・${shown.totalDays}日間${!showSnap && unregCount ? `・<b style="color:inherit;background:var(--unreg);padding:0 4px;border-radius:4px">未登録の店 ${unregCount}</b>` : ''}</span>
       <span class="grow"></span>
       ${snapBar}
       <button class="btn" data-copy="sum">集計をコピー</button>
@@ -828,17 +849,21 @@ function renderReport(mode) {
           <span class="muted grow" style="text-align:right">${list.length}件・${fmt(list.reduce((a, r) => a + r.amount, 0))}円</span>
         </div>
         <div class="scroll"><table class="detail">
-          <thead><tr><th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード種類' : '種別'}</th></tr></thead>
+          <thead><tr><th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード' : '種別'}</th><th>分類</th></tr></thead>
           <tbody>${list.map(r => `<tr class="${r.reg ? '' : 'unreg'}">
             <td>${r.date.replace(/-/g, '/')}</td>
-            <td class="store">${esc(r.name)}${r.name !== r.store && r.store ? `<span class="raw">${esc(r.store)}</span>` : ''}${r.reg ? '' : `<button class="reg" data-reg="${esc(r.store)}">＋登録</button>`}</td>
+            <td class="store">${esc(r.name)}${r.name !== r.store && r.store ? `<span class="raw">${esc(r.store)}</span>` : ''}${r.reg || showSnap ? '' : `<button class="reg" data-reg="${esc(r.store)}">＋登録</button>`}</td>
             <td class="n">${fmt(r.amount)}</td>
-            <td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td></tr>`).join('')}</tbody>
+            <td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td>
+            <td class="muted" style="white-space:normal">${esc(classify(r))}</td></tr>`).join('')}</tbody>
         </table></div>
       </div>
-      <div>${showSnap ? `<div class="notice">💾 ${fmtTime(snap.saved_at)} に保存した集計です（${snap.data.rowCount}件・${fmt(snap.data.total)}円）。あとでマスタを変えても、この数字は変わりません。</div>` : ''}
-        ${shown.blocks.map(b => blockHTML(b, shownAvg, shown.totalDays)).join('')}
-        <p class="muted">${showSnap ? '保存した集計の行はクリックできません。しぼりこみは「いまの集計を見る」で。' : '集計表の行をクリックすると、左の明細をしぼりこみます。'}</p></div>
+      <div>${showSnap ? `<div class="notice" style="display:block">💾 <b>${fmtTime(snap.saved_at)} に保存したときのデータ</b>です（${snap.data.rowCount}件・${fmt(snap.data.total)}円）。
+          あとで明細を入れなおしたりマスタを変えたりしても、ここは変わりません。
+          ${snap.data.files?.length ? `<div class="muted" style="margin-top:4px">入れたファイル：${fileList(snap.data.files)}</div>` : ''}
+          ${hasSavedLines ? '' : '<div class="muted" style="margin-top:4px">⚠ この保存は明細が入る前の形なので、左の明細は「いま」のものです。「保存しなおす」で明細も入ります。</div>'}</div>` : ''}
+        ${blocks.map(b => blockHTML(b, shownAvg, shown.totalDays)).join('')}
+        <p class="muted">集計表の行をクリックすると、左の明細をしぼりこみます。</p></div>
     </div>`;
 
   const qi = box.querySelector('[data-q]');
@@ -849,19 +874,26 @@ function renderReport(mode) {
     const f = JSON.parse(tr.dataset.f);
     v.pick = JSON.stringify(v.pick) === JSON.stringify(f) ? null : f;
     renderReport(mode);
+    // On a narrow screen the lines sit above the tables, so bring them into view and flash them.
+    const card = box.querySelector('table.detail')?.closest('.card');
+    if (card) {
+      const r = card.getBoundingClientRect();
+      if (r.top < 0 || r.top > innerHeight - 80) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+    }
   });
   box.querySelectorAll('[data-reg]').forEach(b => b.onclick = () => registerStores([b.dataset.reg]));
   box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(shown, mode, b.dataset.copy, shownAvg));
   const sv = box.querySelector('[data-snap-view]'); if (sv) sv.onclick = () => { v.snap = !v.snap; renderReport(mode); };
   box.querySelector('[data-snap-save]').onclick = async () => {
-    if (snap && !confirm(`${fmtTime(snap.saved_at)} に保存した集計を、いまの集計で上書きしますか？`)) return;
-    try { await saveSnapshot(mode, sel[mode], now); v.snap = false; toast(`${A.title} の集計を保存しました`); }
+    if (snap && !confirm(`${fmtTime(snap.saved_at)} に保存したデータを、いまのデータ（明細・分類・集計）で上書きしますか？`)) return;
+    try { await saveSnapshot(mode, sel[mode], now); v.snap = false; toast(`${A.title} を明細ごとまるごと保存しました（${now.rowCount}件）`); }
     catch (e) { console.error(e); toast('保存できませんでした: ' + (e.message || e)); }
     renderReport(mode);
   };
   const sd = box.querySelector('[data-snap-del]'); if (sd) sd.onclick = async () => {
-    if (!confirm(`${fmtTime(snap.saved_at)} に保存した集計を消しますか？（明細やマスタは消えません）`)) return;
-    try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('保存した集計を消しました'); }
+    if (!confirm(`${fmtTime(snap.saved_at)} に保存したデータを消しますか？（いまの明細やマスタは消えません）`)) return;
+    try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('保存したデータを消しました'); }
     catch (e) { console.error(e); toast('消せませんでした: ' + (e.message || e)); }
     renderReport(mode);
   };
@@ -879,8 +911,10 @@ function blockLines(b, totalDays, avgHead) {
 function exportReport(A, mode, kind, avgHead) {
   const lines = [];
   if (kind === 'detail' || kind === 'csv') {
-    lines.push([A.title], ['利用日', '利用店舗', '金額', mode === 'card' ? 'カード種類' : '種別']);
-    for (const r of A.rows) lines.push([r.date.replace(/-/g, '/'), r.name, r.amount, r.label]);
+    const axes = A.axisNames || [];
+    lines.push([A.title], ['利用日', '利用店舗', '金額', mode === 'card' ? 'カード種類' : '種別', ...axes, 'タグ', '明細の店名']);
+    for (const r of A.lines || A.rows) lines.push([r.date.replace(/-/g, '/'), r.name, r.amount, r.label,
+      ...axes.map(a => r.cats?.[a] ?? ''), (r.tags || []).join(', '), r.store]);
     if (kind === 'csv') lines.push([]);
   }
   if (kind === 'sum' || kind === 'csv') for (const b of A.blocks) lines.push(...blockLines(b, A.totalDays, avgHead), []);
