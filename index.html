@@ -72,6 +72,9 @@
   .zone .line { font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .zone .ok { color: var(--ok); } .zone .bad { color: var(--bad); }
   .zone .clr { margin-top: 6px; }
+  .zone.none { border-style: solid; opacity: .7; }
+  .zone .nonechk { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .zonesnote { margin: -6px 0 12px; font-size: 12px; }
   .busy { opacity: .5; pointer-events: none; }
 
   .titlebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -167,6 +170,7 @@
     <p class="muted">CSVはいつでも、どんどん入れてOK。自動で保存して、請求月ごとに分けます（同じカード・同じ請求月は自動で上書き）。
       ファイル名の最後が <b>v</b> / <b>m</b> / <b>o</b>（例：202611v.csv）なら、この画面のどこにまとめてドロップしても VISA / Master / Olive に振りわけます。</p>
     <div class="zones" id="zones-card"></div>
+    <div class="zonesnote" id="zonesnote-card"></div>
     <div id="report-card"></div>
     <details class="admin"><summary>管理（まちがえて入れたとき）</summary><div id="admin-card"></div></details>
   </section>
@@ -271,7 +275,7 @@ const MF_ACCOUNTS = [
 const OTHER = 'その他';
 const NO_STORE = '（未入力）';
 const KEY = 'card-summary-v2';
-const KIND_LABEL = { confirmed: '確定後', pending: '確定前', mixed: '確定前＋確定後', mf: '' };
+const KIND_LABEL = { confirmed: '確定後', pending: '確定前', mixed: '確定前＋確定後', mf: '', none: 'なし' };
 
 // ===== State =====
 // tx:      [{source, claim, label, date, store, amount}]
@@ -802,7 +806,7 @@ function renderMonthSel(mode) {
 function renderAdmin(mode) {
   const box = document.getElementById(`admin-${mode}`);
   const c = sel[mode];
-  const srcs = (mode === 'card' ? CARD_ZONES : ['MF']).filter(s => c && state.imports.some(i => i.source === s && i.claim === c));
+  const srcs = (mode === 'card' ? CARD_ZONES : ['MF']).filter(s => c && state.imports.some(i => i.source === s && i.claim === c && i.kind !== 'none'));
   if (!srcs.length) { box.innerHTML = '<span class="muted">この月に消せる明細はありません。</span>'; return; }
   // Cards: move a month's data to another card (dropped into the wrong box).
   const moves = mode === 'card'
@@ -821,7 +825,7 @@ function renderAdmin(mode) {
 async function moveCard(claim, from, to) {
   const imp = state.imports.find(i => i.source === from && i.claim === claim);
   if (!imp) return;
-  const clash = state.imports.some(i => i.source === to && i.claim === claim);
+  const clash = state.imports.some(i => i.source === to && i.claim === claim && i.kind !== 'none');
   if (!confirm(`${claimLabel(claim)} の ${from} の明細を ${to} に移しますか？` + (clash ? `\n⚠ ${to} にもこの月の明細があるので、${to} のほうは置きかわります。` : ''))) return;
   try {
     const rows = state.tx.filter(t => t.source === from && t.claim === claim).map(t => ({ ...t, source: to, label: to }));
@@ -833,24 +837,54 @@ async function moveCard(claim, from, to) {
   render();
 }
 
+// "この月はなし": an empty statement (kind 'none'), stored like any other so it syncs and can be undone.
+async function setNone(source, claim, on) {
+  if (!claim) return;
+  try {
+    if (on) await replaceStatements(source, [claim], [], [{ source, claim, kind: 'none', bill_total: null, row_sum: 0, row_count: 0, file_name: '' }]);
+    else await deleteStatement(source, claim);
+    await autoRecord('card', [claim]);
+    toast(`${claimLabel(claim)} の ${source} を「${on ? 'なし' : 'まだ'}」にしました`);
+  } catch (e) { console.error(e); toast('できませんでした: ' + (e.message || e)); }
+  render();
+}
+// Which cards still have nothing for the month (neither a CSV nor "なし").
+function missingCards(claim) {
+  return claim ? CARD_ZONES.filter(z => !state.imports.some(i => i.source === z && i.claim === claim)) : [];
+}
+
 function zoneHTML(id, label, color, mode) {
   const imp = state.imports.find(i => i.source === id && i.claim === sel[mode]);
   const txs = imp ? state.tx.filter(t => t.source === id && t.claim === sel[mode]) : null;
   const total = txs ? txs.reduce((a, t) => a + t.amount, 0) : 0;
-  const kind = imp ? KIND_LABEL[imp.kind] || '' : '';
+  const none = imp?.kind === 'none';
+  const kind = imp && !none ? KIND_LABEL[imp.kind] || '' : '';
+  // Cards only: mark "no statement this month" (a card not used that month), so the month reads as complete.
+  const noneBox = mode === 'card' && sel[mode] && (!imp || none)
+    ? `<label class="nonechk"><input type="checkbox" data-none ${none ? 'checked' : ''}> この月はなし</label>` : '';
+  if (none) return `<div class="zone none" data-zone="${id}" data-mode="${mode}" style="--zc:${color}">
+    <div class="name">${esc(label)}</div>
+    <div class="stat">この月は使っていない（0円）</div>
+    <div class="line">CSVを入れると、こちらに置きかわります</div>${noneBox}
+    <input type="file" accept=".csv,text/csv" multiple hidden></div>`;
   const check = !imp || imp.bill_total == null ? ''
     : imp.bill_total === Math.round(total) ? '<div class="line ok">ご請求額と一致 ✓</div>'
     : `<div class="line bad">⚠ ご請求額 ${fmt(imp.bill_total)}円 とズレ</div>`;
   return `<div class="zone ${txs ? 'has' : ''}" data-zone="${id}" data-mode="${mode}" style="--zc:${color}">
     <div class="name">${esc(label)}${kind ? ` <span class="muted">${kind}</span>` : ''}</div>
     <div class="stat">${txs ? `${txs.length}件・${fmt(total)}円` : 'CSVをここにドロップ'}</div>${check}
-    <div class="line">${esc(imp?.file_name || 'クリックでファイル選択')}</div>
+    <div class="line">${esc(imp?.file_name || 'クリックでファイル選択')}</div>${noneBox}
     <input type="file" accept=".csv,text/csv" multiple hidden></div>`;
 }
 function wireZones(box) {
   box.querySelectorAll('.zone').forEach(z => {
-    const id = z.dataset.zone, mode = z.dataset.mode, fi = z.querySelector('input');
+    const id = z.dataset.zone, mode = z.dataset.mode, fi = z.querySelector('input[type=file]');
     z.onclick = () => fi.click();
+    const nb = z.querySelector('[data-none]');
+    if (nb) {
+      nb.parentElement.onclick = e => e.stopPropagation();
+      nb.onchange = () => setNone(id, sel[mode], nb.checked);
+    }
     fi.onchange = () => { dropInto(id, [...fi.files], z); fi.value = ''; };
     z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
     z.ondragleave = () => z.classList.remove('over');
@@ -1561,6 +1595,10 @@ function render() {
   const zc = document.getElementById('zones-card');
   zc.innerHTML = CARD_ZONES.map(z => zoneHTML(z, z, `var(--${z})`, 'card')).join('');
   wireZones(zc);
+  const miss = missingCards(sel.card), zn = document.getElementById('zonesnote-card');
+  zn.innerHTML = !sel.card ? '' : miss.length
+    ? `<span class="muted">${claimLabel(sel.card)}請求分：まだ ${miss.map(esc).join('・')}（使っていないカードは「この月はなし」にチェック）</span>`
+    : `<span style="color:var(--ok)">${claimLabel(sel.card)}請求分：ぜんぶのカードがそろっています ✓</span>`;
   const zm = document.getElementById('zones-mf');
   zm.innerHTML = zoneHTML('MF', 'マネーフォワード', 'var(--MF)', 'mf');
   wireZones(zm);
