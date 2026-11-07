@@ -224,7 +224,8 @@ let sel = { card: null, mf: null };
 const view = { card: { q: '', only: false, pick: null }, mf: { q: '', only: false, pick: null } };
 let sb = null, user = null, cloud = 'off'; // off | on | busy | err
 
-function emptyState() { return { master: { axes: ['種別'], rows: [] }, tx: [], imports: [] }; }
+function emptyState() { return { master: { axes: ['種別'], rows: [] }, tx: [], imports: [], snapshots: [] }; }
+let snapsMissing = false; // signed in, but the cc_snapshots table has not been created yet
 function loadLocal() {
   try {
     const v = JSON.parse(localStorage.getItem(KEY));
@@ -387,6 +388,41 @@ function saveMaster() {
   }, 800);
 }
 
+async function saveSnapshot(mode, claim, data, savedAt = new Date().toISOString()) {
+  if (user) {
+    setCloud('busy');
+    const { error } = await sb.from('cc_snapshots').upsert({ user_id: user.id, mode, claim, data, saved_at: savedAt });
+    if (error) { setCloud('err'); throw error; }
+    setCloud('on');
+  }
+  state.snapshots = (state.snapshots || []).filter(s => !(s.mode === mode && s.claim === claim)).concat({ mode, claim, data, saved_at: savedAt });
+  saveLocal();
+}
+async function deleteSnapshot(mode, claim) {
+  if (user) {
+    setCloud('busy');
+    const { error } = await sb.from('cc_snapshots').delete().eq('mode', mode).eq('claim', claim);
+    if (error) { setCloud('err'); throw error; }
+    setCloud('on');
+  }
+  state.snapshots = (state.snapshots || []).filter(s => !(s.mode === mode && s.claim === claim));
+  saveLocal();
+}
+// What gets saved: the summary tables only, with amounts rounded. Detail lines stay in cc_tx.
+function snapshotOf(A) {
+  return {
+    title: A.title, totalDays: A.totalDays, asOf: A.asOf, rowCount: A.rows.length,
+    total: Math.round(A.rows.reduce((a, r) => a + r.amount, 0)),
+    blocks: A.blocks.map(b => ({
+      key: b.key, title: b.title, axisName: b.axisName || null, noTotal: !!b.noTotal,
+      items: b.items.map(i => ({ name: i.name, amount: Math.round(i.amount) })),
+      other: b.other ? { name: b.other.name, amount: Math.round(b.other.amount) } : null,
+    })),
+  };
+}
+const snapSig = d => JSON.stringify(d.blocks.map(b => [b.title, b.items.map(i => [i.name, i.amount]), b.other && b.other.amount]));
+const fmtTime = iso => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${pad2(d.getMinutes())}`; };
+
 async function cloudLoad() {
   setCloud('busy');
   try {
@@ -403,7 +439,11 @@ async function cloudLoad() {
       tx.push(...data.map(r => ({ source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount })));
       if (data.length < 1000) break;
     }
-    state = { master: m.data?.data?.axes ? m.data.data : emptyState().master, tx, imports: im.data };
+    // Saved summaries live in a table added later; the app still works if it does not exist yet.
+    const sn = await sb.from('cc_snapshots').select('mode,claim,data,saved_at');
+    snapsMissing = !!sn.error;
+    if (sn.error) console.warn('cc_snapshots:', sn.error.message);
+    state = { master: m.data?.data?.axes ? m.data.data : emptyState().master, tx, imports: im.data, snapshots: sn.data || [] };
     setCloud('on');
   } catch (e) {
     console.error(e); setCloud('err');
@@ -426,6 +466,7 @@ async function uploadLocal() {
       const claims = imps.map(i => i.claim);
       await replaceStatements(src, claims, local.tx.filter(t => t.source === src && claims.includes(t.claim)), imps);
     }
+    for (const s of local.snapshots || []) await saveSnapshot(s.mode, s.claim, s.data, s.saved_at);
     localStorage.removeItem(KEY);
     toast('クラウドに送りました。このブラウザのコピーは消しました');
   } catch (e) { console.error(e); toast('送れませんでした: ' + (e.message || e)); }
@@ -752,11 +793,28 @@ function renderReport(mode) {
   if (v.q) { const q = normStore(v.q).toLowerCase(); list = list.filter(r => normStore(r.store + ' ' + r.name).toLowerCase().includes(q)); }
   const pickLabel = v.pick ? (v.pick.label ?? v.pick.name ?? v.pick.cat) : '';
 
+  // Saved summary for this month (if any), and whether today's numbers still match it.
+  const snap = (state.snapshots || []).find(s => s.mode === mode && s.claim === sel[mode]);
+  const now = snapshotOf(A);
+  const same = snap ? snapSig(snap.data) === snapSig(now) : false;
+  const showSnap = !!(snap && v.snap);
+  const shown = showSnap
+    ? { ...A, blocks: snap.data.blocks, totalDays: snap.data.totalDays, asOf: snap.data.asOf }
+    : A;
+  const shownAvg = shown.asOf ? `1日平均 (${shown.asOf}時点)` : '1日平均';
+  const snapBar = snap
+    ? `<span class="chip" style="background:${same ? 'var(--head)' : 'var(--unreg)'}">💾 ${fmtTime(snap.saved_at)} に保存ずみ・${same ? 'いまと同じ数字' : '⚠ いまの集計と数字がちがう'}</span>
+       <button class="btn" data-snap-view>${showSnap ? 'いまの集計を見る' : '保存した集計を見る'}</button>
+       <button class="btn" data-snap-save>保存しなおす</button>
+       <button class="btn" data-snap-del title="保存した集計を消す">🗑</button>`
+    : `<button class="btn primary" data-snap-save ${snapsMissing ? 'disabled title="保存用のテーブルがまだありません（SQLを流してね）"' : ''}>💾 この月の集計を保存</button>`;
+
   box.innerHTML = `
     <div class="titlebar">
       <h2>${esc(A.title)}</h2>
       <span class="muted">${A.rows.length}件・${A.totalDays}日間${unregCount ? `・<b style="color:inherit;background:var(--unreg);padding:0 4px;border-radius:4px">未登録の店 ${unregCount}</b>` : ''}</span>
       <span class="grow"></span>
+      ${snapBar}
       <button class="btn" data-copy="sum">集計をコピー</button>
       <button class="btn" data-copy="detail">明細をコピー</button>
       <button class="btn" data-copy="csv">CSVで保存</button>
@@ -778,8 +836,9 @@ function renderReport(mode) {
             <td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td></tr>`).join('')}</tbody>
         </table></div>
       </div>
-      <div>${A.blocks.map(b => blockHTML(b, avgHead, A.totalDays)).join('')}
-        <p class="muted">集計表の行をクリックすると、左の明細をしぼりこみます。</p></div>
+      <div>${showSnap ? `<div class="notice">💾 ${fmtTime(snap.saved_at)} に保存した集計です（${snap.data.rowCount}件・${fmt(snap.data.total)}円）。あとでマスタを変えても、この数字は変わりません。</div>` : ''}
+        ${shown.blocks.map(b => blockHTML(b, shownAvg, shown.totalDays)).join('')}
+        <p class="muted">${showSnap ? '保存した集計の行はクリックできません。しぼりこみは「いまの集計を見る」で。' : '集計表の行をクリックすると、左の明細をしぼりこみます。'}</p></div>
     </div>`;
 
   const qi = box.querySelector('[data-q]');
@@ -792,7 +851,20 @@ function renderReport(mode) {
     renderReport(mode);
   });
   box.querySelectorAll('[data-reg]').forEach(b => b.onclick = () => registerStores([b.dataset.reg]));
-  box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(A, mode, b.dataset.copy, avgHead));
+  box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(shown, mode, b.dataset.copy, shownAvg));
+  const sv = box.querySelector('[data-snap-view]'); if (sv) sv.onclick = () => { v.snap = !v.snap; renderReport(mode); };
+  box.querySelector('[data-snap-save]').onclick = async () => {
+    if (snap && !confirm(`${fmtTime(snap.saved_at)} に保存した集計を、いまの集計で上書きしますか？`)) return;
+    try { await saveSnapshot(mode, sel[mode], now); v.snap = false; toast(`${A.title} の集計を保存しました`); }
+    catch (e) { console.error(e); toast('保存できませんでした: ' + (e.message || e)); }
+    renderReport(mode);
+  };
+  const sd = box.querySelector('[data-snap-del]'); if (sd) sd.onclick = async () => {
+    if (!confirm(`${fmtTime(snap.saved_at)} に保存した集計を消しますか？（明細やマスタは消えません）`)) return;
+    try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('保存した集計を消しました'); }
+    catch (e) { console.error(e); toast('消せませんでした: ' + (e.message || e)); }
+    renderReport(mode);
+  };
 }
 
 function blockLines(b, totalDays, avgHead) {

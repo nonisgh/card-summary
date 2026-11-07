@@ -78,3 +78,18 @@ revoke all on function cc_replace_statement(text, text[], jsonb, jsonb) from pub
 revoke all on function cc_delete_statement(text, text) from public, anon;
 grant execute on function cc_replace_statement(text, text[], jsonb, jsonb) to authenticated;
 grant execute on function cc_delete_statement(text, text) to authenticated;
+
+-- ===== 追加（2026-11-07）：保存した集計（スナップショット） =====
+-- 月ごとに「保存した時点の集計表」をそのまま残す。あとでマスタを変えても変わらない。
+-- mode: 'card'（カードの請求月）| 'mf'（マネーフォワードの利用月）。1 か月に 1 つ（保存しなおすと上書き）。
+create table if not exists cc_snapshots (
+  user_id  uuid not null default auth.uid() references auth.users on delete cascade,
+  mode     text not null,
+  claim    text not null,             -- 'YYYY-MM'
+  data     jsonb not null,            -- {title, totalDays, asOf, rowCount, blocks: [...]}
+  saved_at timestamptz not null default now(),
+  primary key (user_id, mode, claim)
+);
+alter table cc_snapshots enable row level security;
+drop policy if exists cc_snapshots_own on cc_snapshots;
+create policy cc_snapshots_own on cc_snapshots for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
