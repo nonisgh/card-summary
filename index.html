@@ -138,13 +138,16 @@
   <section class="pane on" id="pane-card">
     <div class="monthbar"><select id="month-card"></select>
       <label class="btn" for="bulkCard">まとめて選ぶ</label><input type="file" id="bulkCard" accept=".csv,text/csv" multiple hidden>
+      <button class="btn" id="reset-card" title="この月の VISA・Master・Olive の明細をまとめて消す（保存したデータは残る）">🔄 この月をリセット</button>
       <span class="muted">ファイル名の最後が <b>v</b> / <b>m</b> / <b>o</b>（例：202611v.csv）なら、この画面のどこにまとめてドロップしても VISA / Master / Olive に自動で振りわけます。その請求月に保存（同じカード・同じ請求月は置きかえ）。</span></div>
     <div class="zones" id="zones-card"></div>
     <div id="report-card"></div>
   </section>
 
   <section class="pane" id="pane-mf">
-    <div class="monthbar"><select id="month-mf"></select><span class="muted">マネーフォワードは利用した月ごとに保存されます。</span></div>
+    <div class="monthbar"><select id="month-mf"></select>
+      <button class="btn" id="reset-mf" title="この月のマネーフォワードの明細を消す（保存したデータは残る）">🔄 この月をリセット</button>
+      <span class="muted">マネーフォワードは利用した月ごとに保存されます。</span></div>
     <div class="zones" id="zones-mf"></div>
     <p class="muted">取りこむのは「三井住友カード (VpassID)」「かぞくのおさいふ」（入金・キャッシュバック除く）「三井住友銀行」のV〜で始まる明細（プリペイドチャージ除く）です。</p>
     <div id="report-mf"></div>
@@ -636,20 +639,56 @@ function aggregate(data, mode, title, M = compileMaster()) {
 }
 
 // ===== Rendering: statements =====
+// Months to offer: ones with data, plus saved months whose data has been deleted (so they can still be looked back at).
 function claimsFor(mode) {
   const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
-  return [...new Set(state.imports.filter(i => srcs.includes(i.source)).map(i => i.claim))].sort().reverse();
+  return [...new Set([
+    ...state.imports.filter(i => srcs.includes(i.source)).map(i => i.claim),
+    ...(state.snapshots || []).filter(s => s.mode === mode).map(s => s.claim),
+  ])].sort().reverse();
 }
+// Delete the given sources' data for one month. A saved record of the month is kept;
+// if there is none yet, offer to save one first.
+async function clearMonth(mode, claim, sources) {
+  sources = sources.filter(s => state.imports.some(i => i.source === s && i.claim === claim));
+  if (!claim || !sources.length) { toast('この月には消す明細がありません'); return; }
+  const what = sources.map(s => s === 'MF' ? 'マネーフォワード' : s).join('・');
+  try {
+    const saved = () => (state.snapshots || []).some(s => s.mode === mode && s.claim === claim);
+    if (!saved() && !snapsMissing &&
+        confirm(`${claimLabel(claim)} はまだ保存していません。\n消す前に、この月をまるごと保存しておきますか？\n\nOK＝保存してから消す／キャンセル＝保存しないで進む`)) {
+      await saveSnapshot(mode, claim, monthSnapshot(mode, claim));
+    }
+    const kept = saved();
+    if (!confirm(`${claimLabel(claim)} の ${what} の明細を消しますか？` +
+        (kept ? '\n（保存したデータは残るので、あとで見返せます）' : '\n（保存していないので、消すと見返せません）'))) { render(); return; }
+    for (const s of sources) await deleteStatement(s, claim);
+    toast(`${claimLabel(claim)} の ${what} を消しました` + (kept ? '。保存したデータは残っています 💾' : ''));
+  } catch (e) { console.error(e); toast('できませんでした: ' + (e.message || e)); }
+  render();
+}
+
+// The full record of one month as it is right now (what "まるごと保存" stores).
+function monthSnapshot(mode, claim) {
+  const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
+  const title = mode === 'card' ? `【${claimLabel(claim)}請求分】` : `【${claimLabel(claim)}】`;
+  const A = aggregate(state.tx.filter(t => srcs.includes(t.source) && t.claim === claim), mode, title);
+  return snapshotOf(A, state.imports.filter(i => srcs.includes(i.source) && i.claim === claim));
+}
+const hasData = (mode, claim) => state.imports.some(i => (mode === 'card' ? CARD_ZONES : ['MF']).includes(i.source) && i.claim === claim);
 function renderMonthSel(mode) {
   const claims = claimsFor(mode);
   if (!claims.includes(sel[mode])) sel[mode] = claims[0] || null;
   const s = document.getElementById(`month-${mode}`);
   s.innerHTML = claims.length
-    ? claims.map(c => `<option value="${c}">${claimLabel(c)}${mode === 'card' ? '請求分' : ''}</option>`).join('')
+    ? claims.map(c => `<option value="${c}">${claimLabel(c)}${mode === 'card' ? '請求分' : ''}${hasData(mode, c) ? '' : '（💾保存のみ）'}</option>`).join('')
     : '<option>まだデータがありません</option>';
   s.disabled = !claims.length;
   if (sel[mode]) s.value = sel[mode];
-  s.onchange = () => { sel[mode] = s.value; view[mode].pick = null; render(); };
+  s.onchange = () => { sel[mode] = s.value; view[mode].pick = null; view[mode].snap = false; render(); };
+  const rb = document.getElementById(`reset-${mode}`);
+  rb.disabled = !sel[mode] || !hasData(mode, sel[mode]);
+  rb.onclick = () => clearMonth(mode, sel[mode], mode === 'card' ? CARD_ZONES : ['MF']);
 }
 
 function zoneHTML(id, label, color, mode) {
@@ -676,11 +715,7 @@ function wireZones(box) {
     z.ondragleave = () => z.classList.remove('over');
     z.ondrop = e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); dropInto(id, [...e.dataTransfer.files], z); };
     const clr = z.querySelector('.clr');
-    if (clr) clr.onclick = async () => {
-      if (!confirm(`${id === 'MF' ? 'マネーフォワード' : id} の ${claimLabel(sel[mode])} 分を消しますか？`)) return;
-      try { await deleteStatement(id, sel[mode]); } catch (e) { toast('消せませんでした: ' + (e.message || e)); }
-      render();
-    };
+    if (clr) clr.onclick = () => clearMonth(mode, sel[mode], [id]);
   });
 }
 
@@ -789,10 +824,12 @@ function renderReport(mode) {
   const box = document.getElementById(`report-${mode}`);
   const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
   const data = state.tx.filter(t => srcs.includes(t.source) && t.claim === sel[mode]);
-  if (!data.length) { box.innerHTML = '<p class="muted">上の箱にCSVをドロップすると集計が出ます。</p>'; return; }
+  const savedOnly = !data.length && (state.snapshots || []).some(s => s.mode === mode && s.claim === sel[mode]);
+  if (!data.length && !savedOnly) { box.innerHTML = '<p class="muted">上の箱にCSVをドロップすると集計が出ます。</p>'; return; }
   const title = mode === 'card' ? `【${claimLabel(sel[mode])}請求分】` : `【${claimLabel(sel[mode])}】`;
   const A = aggregate(data, mode, title);
   const v = view[mode];
+  if (savedOnly) v.snap = true; // nothing current to show: the saved record is all there is
   const unregCount = new Set(A.rows.filter(r => !r.reg).map(r => r.name)).size;
 
   // Saved month (if any), and whether today's numbers still match it.
@@ -823,7 +860,11 @@ function renderReport(mode) {
   const classify = r => [...shown.axisNames.map(a => r.cats?.[a]).filter(c => c && c !== OTHER), ...(r.tags || []).map(t => '#' + t)].join('・');
 
   const fileList = list => list.map(i => `${esc(i.source === 'MF' ? 'MF' : i.source)}: ${esc(i.file_name || '')}${KIND_LABEL[i.kind] ? `（${KIND_LABEL[i.kind]}）` : ''}`).join(' ／ ');
-  const snapBar = snap
+  const snapBar = savedOnly
+    // The month's data was cleared: only the saved record is left, so there is nothing to compare or re-save.
+    ? `<span class="chip">💾 ${fmtTime(snap.saved_at)} に保存したデータだけ残っています</span>
+       <button class="btn" data-snap-del title="保存したデータを消す">🗑</button>`
+    : snap
     ? `<span class="chip" style="background:${same ? 'var(--head)' : 'var(--unreg)'}">💾 ${fmtTime(snap.saved_at)} に保存ずみ・${same ? 'いまと同じ' : '⚠ いまとちがう'}</span>
        <button class="btn" data-snap-view>${showSnap ? 'いまのデータを見る' : '保存したときを見る'}</button>
        <button class="btn" data-snap-save>保存しなおす</button>
@@ -885,17 +926,19 @@ function renderReport(mode) {
   box.querySelectorAll('[data-reg]').forEach(b => b.onclick = () => registerStores([b.dataset.reg]));
   box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(shown, mode, b.dataset.copy, shownAvg));
   const sv = box.querySelector('[data-snap-view]'); if (sv) sv.onclick = () => { v.snap = !v.snap; renderReport(mode); };
-  box.querySelector('[data-snap-save]').onclick = async () => {
+  const ss = box.querySelector('[data-snap-save]'); if (ss) ss.onclick = async () => {
     if (snap && !confirm(`${fmtTime(snap.saved_at)} に保存したデータを、いまのデータ（明細・分類・集計）で上書きしますか？`)) return;
     try { await saveSnapshot(mode, sel[mode], now); v.snap = false; toast(`${A.title} を明細ごとまるごと保存しました（${now.rowCount}件）`); }
     catch (e) { console.error(e); toast('保存できませんでした: ' + (e.message || e)); }
     renderReport(mode);
   };
   const sd = box.querySelector('[data-snap-del]'); if (sd) sd.onclick = async () => {
-    if (!confirm(`${fmtTime(snap.saved_at)} に保存したデータを消しますか？（いまの明細やマスタは消えません）`)) return;
+    if (!confirm(savedOnly
+      ? `${fmtTime(snap.saved_at)} に保存したデータを消しますか？\nこの月の明細はもう消してあるので、消すとこの月は見返せなくなります。`
+      : `${fmtTime(snap.saved_at)} に保存したデータを消しますか？（いまの明細やマスタは消えません）`)) return;
     try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('保存したデータを消しました'); }
     catch (e) { console.error(e); toast('消せませんでした: ' + (e.message || e)); }
-    renderReport(mode);
+    render();
   };
 }
 
