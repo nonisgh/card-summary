@@ -50,6 +50,17 @@
   #pane-master.over, #pane-card.over { outline: 3px dashed var(--accent); outline-offset: 6px; border-radius: 12px; }
 
   .monthbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .mpick { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .mpick select { font-weight: 700; }
+  .mpick button { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 0; width: 3.2em; cursor: pointer; font-size: 13px; }
+  .mpick button:disabled { opacity: .3; cursor: default; }
+  .mpick button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .mpick button.saved { border-style: dashed; }
+  details.admin { margin-top: 18px; font-size: 13px; }
+  details.admin summary { cursor: pointer; color: var(--muted); }
+  details.admin > div { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .db th { background: var(--head); text-align: center; position: sticky; top: 0; }
+  .db tr.month td { background: var(--sub); font-weight: 700; border-top: 2px solid var(--line); }
   .monthbar select { font-weight: 700; }
 
   .zones { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 14px; }
@@ -132,25 +143,44 @@
     <button data-tab="card" class="on">クレジットカード</button>
     <button data-tab="mf">マネーフォワード</button>
     <button data-tab="trend">推移</button>
+    <button data-tab="db">明細DB</button>
     <button data-tab="master">種別マスタ <span class="badge" id="unregBadge" hidden></span></button>
   </div>
 
   <section class="pane on" id="pane-card">
-    <div class="monthbar"><select id="month-card"></select>
-      <label class="btn" for="bulkCard">まとめて選ぶ</label><input type="file" id="bulkCard" accept=".csv,text/csv" multiple hidden>
-      <button class="btn" id="reset-card" title="この月の VISA・Master・Olive の明細をまとめて消す（保存したデータは残る）">🔄 この月をリセット</button>
-      <span class="muted">ファイル名の最後が <b>v</b> / <b>m</b> / <b>o</b>（例：202611v.csv）なら、この画面のどこにまとめてドロップしても VISA / Master / Olive に自動で振りわけます。その請求月に保存（同じカード・同じ請求月は置きかえ）。</span></div>
+    <div class="monthbar"><div class="mpick" id="month-card"></div>
+      <label class="btn" for="bulkCard">まとめて選ぶ</label><input type="file" id="bulkCard" accept=".csv,text/csv" multiple hidden></div>
+    <p class="muted">CSVはいつでも、どんどん入れてOK。自動で保存して、請求月ごとに分けます（同じカード・同じ請求月は自動で上書き）。
+      ファイル名の最後が <b>v</b> / <b>m</b> / <b>o</b>（例：202611v.csv）なら、この画面のどこにまとめてドロップしても VISA / Master / Olive に振りわけます。</p>
     <div class="zones" id="zones-card"></div>
     <div id="report-card"></div>
+    <details class="admin"><summary>管理（まちがえて入れたとき）</summary><div id="admin-card"></div></details>
   </section>
 
   <section class="pane" id="pane-mf">
-    <div class="monthbar"><select id="month-mf"></select>
-      <button class="btn" id="reset-mf" title="この月のマネーフォワードの明細を消す（保存したデータは残る）">🔄 この月をリセット</button>
-      <span class="muted">マネーフォワードは利用した月ごとに保存されます。</span></div>
+    <div class="monthbar"><div class="mpick" id="month-mf"></div></div>
+    <p class="muted">CSVはいつでも入れてOK。自動で保存して、利用した月ごとに分けます（同じ月は自動で上書き）。
+      取りこむのは「三井住友カード (VpassID)」「かぞくのおさいふ」（入金・キャッシュバック除く）「三井住友銀行」のV〜で始まる明細（プリペイドチャージ除く）です。</p>
     <div class="zones" id="zones-mf"></div>
-    <p class="muted">取りこむのは「三井住友カード (VpassID)」「かぞくのおさいふ」（入金・キャッシュバック除く）「三井住友銀行」のV〜で始まる明細（プリペイドチャージ除く）です。</p>
     <div id="report-mf"></div>
+    <details class="admin"><summary>管理（まちがえて入れたとき）</summary><div id="admin-mf"></div></details>
+  </section>
+
+  <section class="pane" id="pane-db">
+    <div class="card">
+      <div class="filters">
+        <select id="dbSrc"><option value="card">カード（請求月）</option><option value="mf">マネーフォワード（利用月）</option></select>
+        <select id="dbFrom"></select><span class="muted">〜</span><select id="dbTo"></select>
+        <select id="dbCard"></select>
+        <select id="dbAxis"></select><select id="dbCat"></select>
+        <select id="dbTag"></select>
+        <input type="text" id="dbQ" placeholder="店名で検索（例：ANTHROPIC）">
+        <span class="grow"></span>
+        <button class="btn" id="dbCopy">コピー</button><button class="btn" id="dbCsv">CSVで保存</button>
+      </div>
+      <div class="muted" id="dbSum"></div>
+      <div class="scroll" id="dbBox"></div>
+    </div>
   </section>
 
   <section class="pane" id="pane-trend">
@@ -632,7 +662,7 @@ function aggregate(data, mode, title, M = compileMaster()) {
   // Each line with its classification, in the same shape a saved month keeps.
   const axisNames = M.axes.map(a => a.name);
   const lines = rows.map(r => ({
-    date: r.date, store: r.store, name: r.name, amount: r.amount, label: r.label, reg: r.reg,
+    date: r.date, store: r.store, name: r.name, amount: r.amount, label: r.label, reg: r.reg, claim: r.claim, source: r.source,
     cats: Object.fromEntries(M.axes.map(a => [a.name, catOfAxis(r, a.i)])), tags: tagsOf(r),
   }));
   return { rows, lines, axisNames, blocks, title, totalDays, asOf, catOfAxis, tagsOf };
@@ -668,7 +698,22 @@ async function clearMonth(mode, claim, sources) {
   render();
 }
 
-// The full record of one month as it is right now (what "まるごと保存" stores).
+// Keep each month's record up to date automatically (no save button). The record is what remains
+// viewable if the month's data is later deleted. Failures are silent: the data itself is already saved.
+const recording = new Set();
+async function autoRecord(mode, claims) {
+  if (snapsMissing) return;
+  for (const c of claims) {
+    const key = `${mode}|${c}`;
+    if (recording.has(key) || !hasData(mode, c)) continue;
+    recording.add(key);
+    try { await saveSnapshot(mode, c, monthSnapshot(mode, c)); }
+    catch (e) { console.warn('auto record failed', e); }
+    finally { recording.delete(key); }
+  }
+}
+
+// The full record of one month as it is right now.
 function monthSnapshot(mode, claim) {
   const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
   const title = mode === 'card' ? `【${claimLabel(claim)}請求分】` : `【${claimLabel(claim)}】`;
@@ -676,19 +721,37 @@ function monthSnapshot(mode, claim) {
   return snapshotOf(A, state.imports.filter(i => srcs.includes(i.source) && i.claim === claim));
 }
 const hasData = (mode, claim) => state.imports.some(i => (mode === 'card' ? CARD_ZONES : ['MF']).includes(i.source) && i.claim === claim);
+// Year selector + 12 month buttons. Only months that have data (or a saved record) can be pressed.
 function renderMonthSel(mode) {
   const claims = claimsFor(mode);
   if (!claims.includes(sel[mode])) sel[mode] = claims[0] || null;
-  const s = document.getElementById(`month-${mode}`);
-  s.innerHTML = claims.length
-    ? claims.map(c => `<option value="${c}">${claimLabel(c)}${mode === 'card' ? '請求分' : ''}${hasData(mode, c) ? '' : '（💾保存のみ）'}</option>`).join('')
-    : '<option>まだデータがありません</option>';
-  s.disabled = !claims.length;
-  if (sel[mode]) s.value = sel[mode];
-  s.onchange = () => { sel[mode] = s.value; view[mode].pick = null; view[mode].snap = false; render(); };
-  const rb = document.getElementById(`reset-${mode}`);
-  rb.disabled = !sel[mode] || !hasData(mode, sel[mode]);
-  rb.onclick = () => clearMonth(mode, sel[mode], mode === 'card' ? CARD_ZONES : ['MF']);
+  const box = document.getElementById(`month-${mode}`);
+  if (!claims.length) { box.innerHTML = '<span class="muted">まだデータがありません</span>'; renderAdmin(mode); return; }
+  const years = [...new Set(claims.map(c => c.slice(0, 4)))].sort().reverse();
+  const y = sel[mode].slice(0, 4);
+  box.innerHTML = `<select data-year>${years.map(v => `<option value="${v}" ${v === y ? 'selected' : ''}>${v}年</option>`).join('')}</select>` +
+    Array.from({ length: 12 }, (_, i) => {
+      const c = `${y}-${pad2(i + 1)}`, has = claims.includes(c), dataHere = has && hasData(mode, c);
+      return `<button data-m="${c}" ${has ? '' : 'disabled'} class="${c === sel[mode] ? 'on' : ''} ${has && !dataHere ? 'saved' : ''}"
+        title="${claimLabel(c)}${mode === 'card' ? '請求分' : ''}${has && !dataHere ? '（記録だけ残っています）' : ''}">${i + 1}月</button>`;
+    }).join('') + `<span class="muted">${mode === 'card' ? '請求月' : '利用月'}</span>`;
+  const go = c => { sel[mode] = c; view[mode].pick = null; view[mode].snap = false; render(); };
+  box.querySelector('[data-year]').onchange = e => go(claims.filter(c => c.startsWith(e.target.value))[0]);
+  box.querySelectorAll('[data-m]').forEach(b => b.onclick = () => go(b.dataset.m));
+  renderAdmin(mode);
+}
+
+// 管理: delete a month's data (for files put in by mistake). The month's record stays.
+function renderAdmin(mode) {
+  const box = document.getElementById(`admin-${mode}`);
+  const c = sel[mode];
+  const srcs = (mode === 'card' ? CARD_ZONES : ['MF']).filter(s => c && state.imports.some(i => i.source === s && i.claim === c));
+  if (!srcs.length) { box.innerHTML = '<span class="muted">この月に消せる明細はありません。</span>'; return; }
+  box.innerHTML = `<span class="muted">${claimLabel(c)}：</span>` +
+    srcs.map(s => `<button class="btn" data-del="${s}">${s === 'MF' ? 'マネーフォワード' : s} の明細を消す</button>`).join('') +
+    (srcs.length > 1 ? `<button class="btn" data-del="*">ぜんぶ消す</button>` : '') +
+    `<span class="muted">消しても、この月の記録は残って見返せます。</span>`;
+  box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => clearMonth(mode, c, b.dataset.del === '*' ? srcs : [b.dataset.del]));
 }
 
 function zoneHTML(id, label, color, mode) {
@@ -703,19 +766,16 @@ function zoneHTML(id, label, color, mode) {
     <div class="name">${esc(label)}${kind ? ` <span class="muted">${kind}</span>` : ''}</div>
     <div class="stat">${txs ? `${txs.length}件・${fmt(total)}円` : 'CSVをここにドロップ'}</div>${check}
     <div class="line">${esc(imp?.file_name || 'クリックでファイル選択')}</div>
-    ${txs ? '<button class="btn clr">この月を消す</button>' : ''}
     <input type="file" accept=".csv,text/csv" multiple hidden></div>`;
 }
 function wireZones(box) {
   box.querySelectorAll('.zone').forEach(z => {
     const id = z.dataset.zone, mode = z.dataset.mode, fi = z.querySelector('input');
-    z.onclick = e => { if (!e.target.closest('.clr')) fi.click(); };
+    z.onclick = () => fi.click();
     fi.onchange = () => { dropInto(id, [...fi.files], z); fi.value = ''; };
     z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
     z.ondragleave = () => z.classList.remove('over');
     z.ondrop = e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); dropInto(id, [...e.dataTransfer.files], z); };
-    const clr = z.querySelector('.clr');
-    if (clr) clr.onclick = () => clearMonth(mode, sel[mode], [id]);
   });
 }
 
@@ -724,19 +784,37 @@ async function dropInto(id, files, zoneEl) {
   zoneEl.classList.add('busy');
   try {
     if (id === 'MF') {
-      const rows = [];
-      let skipped = 0;
-      for (const f of files) { const p = parseMFCSV(parseCSV(decode(await f.arrayBuffer()))); rows.push(...p.rows); skipped += p.skipped; }
-      if (!rows.length) { toast('マネーフォワード: 取りこめる明細がありませんでした'); return; }
-      rows.forEach(r => { r.source = 'MF'; r.claim = r.date.slice(0, 7); });
-      const claims = [...new Set(rows.map(r => r.claim))].sort();
-      const imports = claims.map(c => {
+      // MF files cover a date range (often overlapping, and provisional names such as debit "V123456 …"
+      // change once settled). Each file replaces exactly the days it covers; lines outside stay.
+      let merged = state.tx.filter(t => t.source === 'MF');
+      const touched = new Set(), names = new Map();
+      let added = 0, skipped = 0;
+      for (const f of files) {
+        const p = parseMFCSV(parseCSV(decode(await f.arrayBuffer())));
+        skipped += p.skipped;
+        const range = mfRange(f.name, p.rows);
+        if (!range) continue;
+        merged = merged.filter(t => t.date < range.from || t.date > range.to)
+          .concat(p.rows.map(r => ({ ...r, source: 'MF', claim: r.date.slice(0, 7) })));
+        added += p.rows.length;
+        for (let c = range.from.slice(0, 7); c <= range.to.slice(0, 7); c = addMonth(c, 1)) {
+          touched.add(c);
+          names.set(c, [...(names.get(c) || []), f.name]);
+        }
+      }
+      if (!touched.size) { toast('マネーフォワード: 取りこめる明細がありませんでした'); return; }
+      const claims = [...touched].sort();
+      const rows = merged.filter(t => touched.has(t.claim));
+      const imports = claims.filter(c => rows.some(r => r.claim === c)).map(c => {
         const rs = rows.filter(r => r.claim === c);
-        return { source: 'MF', claim: c, kind: 'mf', bill_total: null, row_sum: Math.round(rs.reduce((a, r) => a + r.amount, 0)), row_count: rs.length, file_name: files.map(f => f.name).join(', ') };
+        const old = state.imports.find(i => i.source === 'MF' && i.claim === c)?.file_name;
+        const fileNames = [...new Set([...(old ? old.split(', ') : []), ...names.get(c)])].join(', ');
+        return { source: 'MF', claim: c, kind: 'mf', bill_total: null, row_sum: Math.round(rs.reduce((a, r) => a + r.amount, 0)), row_count: rs.length, file_name: fileNames };
       });
       await replaceStatements('MF', claims, rows, imports);
-      sel.mf = claims[claims.length - 1];
-      toast(`マネーフォワード: ${rows.length}件を ${claims.map(claimLabel).join('・')} に保存` + (skipped ? `（対象外の口座 ${skipped}件は除外）` : ''));
+      await autoRecord('mf', claims);
+      sel.mf = imports.length ? imports[imports.length - 1].claim : sel.mf;
+      toast(`マネーフォワード: ${added}件を取りこみ（${claims.map(claimLabel).join('・')}、かさなる日は新しいほうで上書き）` + (skipped ? `・対象外の口座 ${skipped}件は除外` : ''));
     } else {
       // The card comes from the file name (…v.csv / …m.csv / …o.csv) when it has that suffix,
       // otherwise from the box it was dropped on. id is null for a drop outside the boxes.
@@ -761,6 +839,16 @@ async function dropInto(id, files, zoneEl) {
     zoneEl.classList.remove('busy');
     render();
   }
+}
+
+// The days an MF file covers: from its name ("収入・支出詳細_2026-10-01_2026-10-31.csv"),
+// otherwise the first and last date in it.
+function mfRange(name, rows) {
+  const m = String(name).match(/(\d{4})-(\d{2})-(\d{2})_(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return { from: `${m[1]}-${m[2]}-${m[3]}`, to: `${m[4]}-${m[5]}-${m[6]}` };
+  if (!rows.length) return null;
+  const d = rows.map(r => r.date).sort();
+  return { from: d[0], to: d[d.length - 1] };
 }
 
 // "202611v.csv" -> VISA, "202611 m.csv" -> Mastercard, "202611_O.csv" -> Olive (last letter before the extension)
@@ -794,6 +882,7 @@ async function importCardFiles(id, files) {
     imports.push({ source: id, claim: c, kind: g.kinds.size > 1 ? 'mixed' : [...g.kinds][0], bill_total: g.bill, row_sum: Math.round(sum), row_count: g.rows.length, file_name: g.files.join(', ') });
   }
   await replaceStatements(id, claims, rows, imports);
+  await autoRecord('card', claims);
   const last = claims[claims.length - 1];
   if (!sel.card || last > sel.card) sel.card = last;
   return msgs.concat(imports.map(i => {
@@ -860,16 +949,12 @@ function renderReport(mode) {
   const classify = r => [...shown.axisNames.map(a => r.cats?.[a]).filter(c => c && c !== OTHER), ...(r.tags || []).map(t => '#' + t)].join('・');
 
   const fileList = list => list.map(i => `${esc(i.source === 'MF' ? 'MF' : i.source)}: ${esc(i.file_name || '')}${KIND_LABEL[i.kind] ? `（${KIND_LABEL[i.kind]}）` : ''}`).join(' ／ ');
+  // The month's record is kept up to date automatically; refresh it when today's numbers differ.
+  if (!savedOnly && (!snap || !same)) autoRecord(mode, [sel[mode]]);
   const snapBar = savedOnly
-    // The month's data was cleared: only the saved record is left, so there is nothing to compare or re-save.
-    ? `<span class="chip">💾 ${fmtTime(snap.saved_at)} に保存したデータだけ残っています</span>
-       <button class="btn" data-snap-del title="保存したデータを消す">🗑</button>`
-    : snap
-    ? `<span class="chip" style="background:${same ? 'var(--head)' : 'var(--unreg)'}">💾 ${fmtTime(snap.saved_at)} に保存ずみ・${same ? 'いまと同じ' : '⚠ いまとちがう'}</span>
-       <button class="btn" data-snap-view>${showSnap ? 'いまのデータを見る' : '保存したときを見る'}</button>
-       <button class="btn" data-snap-save>保存しなおす</button>
-       <button class="btn" data-snap-del title="保存したデータを消す">🗑</button>`
-    : `<button class="btn primary" data-snap-save ${snapsMissing ? 'disabled title="保存用のテーブルがまだありません（SQLを流してね）"' : ''}>💾 この月をまるごと保存</button>`;
+    ? `<span class="chip">💾 記録だけ残っています（明細は消してあります）</span>
+       <button class="btn" data-snap-del title="この月の記録を消す">🗑</button>`
+    : user || !snapsMissing ? `<span class="muted">💾 自動保存</span>` : '';
 
   box.innerHTML = `
     <div class="titlebar">
@@ -899,10 +984,10 @@ function renderReport(mode) {
             <td class="muted" style="white-space:normal">${esc(classify(r))}</td></tr>`).join('')}</tbody>
         </table></div>
       </div>
-      <div>${showSnap ? `<div class="notice" style="display:block">💾 <b>${fmtTime(snap.saved_at)} に保存したときのデータ</b>です（${snap.data.rowCount}件・${fmt(snap.data.total)}円）。
-          あとで明細を入れなおしたりマスタを変えたりしても、ここは変わりません。
-          ${snap.data.files?.length ? `<div class="muted" style="margin-top:4px">入れたファイル：${fileList(snap.data.files)}</div>` : ''}
-          ${hasSavedLines ? '' : '<div class="muted" style="margin-top:4px">⚠ この保存は明細が入る前の形なので、左の明細は「いま」のものです。「保存しなおす」で明細も入ります。</div>'}</div>` : ''}
+      <div>${showSnap ? `<div class="notice" style="display:block">💾 この月の明細は消してあります。<b>${fmtTime(snap.saved_at)} に記録したときのデータ</b>です（${snap.data.rowCount}件・${fmt(snap.data.total)}円）。
+          もう一度CSVを入れると、ふつうの月にもどります。
+          ${snap.data.files?.length ? `<div class="muted" style="margin-top:4px">入れていたファイル：${fileList(snap.data.files)}</div>` : ''}
+          ${hasSavedLines ? '' : '<div class="muted" style="margin-top:4px">⚠ この記録は古い形なので、集計表しか入っていません。</div>'}</div>` : ''}
         ${blocks.map(b => blockHTML(b, shownAvg, shown.totalDays)).join('')}
         <p class="muted">集計表の行をクリックすると、左の明細をしぼりこみます。</p></div>
     </div>`;
@@ -925,18 +1010,9 @@ function renderReport(mode) {
   });
   box.querySelectorAll('[data-reg]').forEach(b => b.onclick = () => registerStores([b.dataset.reg]));
   box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => exportReport(shown, mode, b.dataset.copy, shownAvg));
-  const sv = box.querySelector('[data-snap-view]'); if (sv) sv.onclick = () => { v.snap = !v.snap; renderReport(mode); };
-  const ss = box.querySelector('[data-snap-save]'); if (ss) ss.onclick = async () => {
-    if (snap && !confirm(`${fmtTime(snap.saved_at)} に保存したデータを、いまのデータ（明細・分類・集計）で上書きしますか？`)) return;
-    try { await saveSnapshot(mode, sel[mode], now); v.snap = false; toast(`${A.title} を明細ごとまるごと保存しました（${now.rowCount}件）`); }
-    catch (e) { console.error(e); toast('保存できませんでした: ' + (e.message || e)); }
-    renderReport(mode);
-  };
   const sd = box.querySelector('[data-snap-del]'); if (sd) sd.onclick = async () => {
-    if (!confirm(savedOnly
-      ? `${fmtTime(snap.saved_at)} に保存したデータを消しますか？\nこの月の明細はもう消してあるので、消すとこの月は見返せなくなります。`
-      : `${fmtTime(snap.saved_at)} に保存したデータを消しますか？（いまの明細やマスタは消えません）`)) return;
-    try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('保存したデータを消しました'); }
+    if (!confirm(`${claimLabel(sel[mode])} の記録を消しますか？\nこの月の明細はもう消してあるので、消すとこの月は見返せなくなります。`)) return;
+    try { await deleteSnapshot(mode, sel[mode]); v.snap = false; toast('記録を消しました'); }
     catch (e) { console.error(e); toast('消せませんでした: ' + (e.message || e)); }
     render();
   };
@@ -978,6 +1054,64 @@ async function copyText(text, msg) {
   }
   toast(msg);
 }
+
+// ===== Rendering: 明細DB (every line across months, filterable) =====
+let dbLines = [];
+function renderDB() {
+  const $ = id => document.getElementById(id);
+  const mode = $('dbSrc').value;
+  const srcs = mode === 'card' ? CARD_ZONES : ['MF'];
+  const all = aggregate(state.tx.filter(t => srcs.includes(t.source)), mode, '');
+  const claims = [...new Set(all.lines.map(r => r.claim))].sort();
+  const keep = (sel, opts, fallback) => { const v = sel.value; sel.innerHTML = opts; sel.value = [...sel.options].some(o => o.value === v) ? v : fallback; };
+  const monthOpts = claims.map(c => `<option value="${c}">${claimLabel(c)}</option>`).join('');
+  keep($('dbFrom'), monthOpts, claims[0] || ''); keep($('dbTo'), monthOpts, claims[claims.length - 1] || '');
+  keep($('dbCard'), `<option value="">${mode === 'card' ? 'すべてのカード' : 'すべての種別'}</option>` +
+    [...new Set(all.lines.map(r => r.label))].map(l => `<option>${esc(l)}</option>`).join(''), '');
+  keep($('dbAxis'), `<option value="">種別でしぼらない</option>` + all.axisNames.map(a => `<option>${esc(a)}</option>`).join(''), '');
+  const ax = $('dbAxis').value;
+  $('dbCat').hidden = !ax;
+  keep($('dbCat'), ax ? [...new Set(all.lines.map(r => r.cats[ax]))].map(c => `<option>${esc(c)}</option>`).join('') : '', '');
+  if (ax && !$('dbCat').value) $('dbCat').selectedIndex = 0;
+  const tags = [...new Set(all.lines.flatMap(r => r.tags))];
+  $('dbTag').hidden = !tags.length;
+  keep($('dbTag'), `<option value="">タグでしぼらない</option>` + tags.map(t => `<option>${esc(t)}</option>`).join(''), '');
+
+  const from = $('dbFrom').value, to = $('dbTo').value, card = $('dbCard').value, cat = $('dbCat').value, tag = $('dbTag').value;
+  const q = normStore($('dbQ').value).toLowerCase();
+  const list = all.lines.filter(r => (!from || r.claim >= from) && (!to || r.claim <= to) && (!card || r.label === card) &&
+    (!ax || r.cats[ax] === cat) && (!tag || r.tags.includes(tag)) && (!q || normStore(r.store + ' ' + r.name).toLowerCase().includes(q)))
+    .sort((a, b) => b.claim.localeCompare(a.claim) || a.date.localeCompare(b.date));
+  dbLines = list;
+
+  const total = list.reduce((a, r) => a + r.amount, 0);
+  const months = [...new Set(list.map(r => r.claim))];
+  $('dbSum').textContent = list.length ? `${list.length}件・${fmt(total)}円（${months.length}か月・月平均 ${fmt(total / months.length)}円）` : '';
+  if (!list.length) { $('dbBox').innerHTML = '<p class="muted">あてはまる明細がありません。</p>'; return; }
+  const classify = r => [...all.axisNames.map(a => r.cats[a]).filter(c => c && c !== OTHER), ...r.tags.map(t => '#' + t)].join('・');
+  let html = '', cur = null;
+  for (const r of list) {
+    if (r.claim !== cur) {
+      cur = r.claim;
+      const ms = list.filter(x => x.claim === cur);
+      html += `<tr class="month"><td colspan="3">${claimLabel(cur)}${mode === 'card' ? '請求分' : ''}（${ms.length}件）</td><td class="n">${fmt(ms.reduce((a, x) => a + x.amount, 0))}</td><td colspan="2"></td></tr>`;
+    }
+    html += `<tr class="${r.reg ? '' : 'unreg'}"><td></td><td>${r.date.replace(/-/g, '/')}</td>
+      <td class="store">${esc(r.name)}${r.name !== r.store && r.store ? `<span class="raw">${esc(r.store)}</span>` : ''}</td>
+      <td class="n">${fmt(r.amount)}</td><td style="color:var(--${mode === 'card' ? r.label : 'MF'})">${esc(r.label)}</td>
+      <td class="muted" style="white-space:normal">${esc(classify(r))}</td></tr>`;
+  }
+  $('dbBox').innerHTML = `<table class="detail db"><thead><tr><th>${mode === 'card' ? '請求月' : '利用月'}</th><th>利用日</th><th>利用店舗</th><th>金額</th><th>${mode === 'card' ? 'カード' : '種別'}</th><th>分類</th></tr></thead><tbody>${html}</tbody></table>`;
+}
+['dbSrc', 'dbFrom', 'dbTo', 'dbCard', 'dbAxis', 'dbCat', 'dbTag'].forEach(id => document.getElementById(id).onchange = renderDB);
+document.getElementById('dbQ').oninput = renderDB;
+const dbRows = () => {
+  const axes = [...new Set(dbLines.flatMap(r => Object.keys(r.cats)))];
+  return [['月', '利用日', '利用店舗', '金額', 'カード/種別', ...axes, 'タグ', '明細の店名'],
+    ...dbLines.map(r => [r.claim, r.date.replace(/-/g, '/'), r.name, r.amount, r.label, ...axes.map(a => r.cats[a] ?? ''), r.tags.join(', '), r.store])];
+};
+document.getElementById('dbCopy').onclick = () => copyText(dbRows().map(r => r.join('\t')).join('\n'), `${dbLines.length}件をコピーしました（シートに貼れます）`);
+document.getElementById('dbCsv').onclick = () => downloadCSV(dbRows(), `明細DB_${document.getElementById('dbFrom').value}_${document.getElementById('dbTo').value}.csv`);
 
 // ===== Rendering: trend =====
 let trendLines = [];
@@ -1204,6 +1338,7 @@ function render() {
   if (tab === 'card') renderReport('card');
   if (tab === 'mf') renderReport('mf');
   if (tab === 'trend') renderTrend();
+  if (tab === 'db') renderDB();
   if (tab === 'master') renderMaster();
   renderAccount(); renderNotice(); updateBadge();
 }
