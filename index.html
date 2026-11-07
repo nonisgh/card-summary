@@ -47,7 +47,7 @@
   .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
   .tabs .badge { background: var(--unreg); color: var(--ink); border-radius: 999px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
   .pane { display: none; } .pane.on { display: block; }
-  #pane-master.over { outline: 3px dashed var(--accent); outline-offset: 6px; border-radius: 12px; }
+  #pane-master.over, #pane-card.over { outline: 3px dashed var(--accent); outline-offset: 6px; border-radius: 12px; }
 
   .monthbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
   .monthbar select { font-weight: 700; }
@@ -134,7 +134,9 @@
   </div>
 
   <section class="pane on" id="pane-card">
-    <div class="monthbar"><select id="month-card"></select><span class="muted">CSVをドロップすると、その請求月に保存されます（同じカード・同じ請求月は置きかえ）。</span></div>
+    <div class="monthbar"><select id="month-card"></select>
+      <label class="btn" for="bulkCard">まとめて選ぶ</label><input type="file" id="bulkCard" accept=".csv,text/csv" multiple hidden>
+      <span class="muted">ファイル名の最後が <b>v</b> / <b>m</b> / <b>o</b>（例：202611v.csv）なら、この画面のどこにまとめてドロップしても VISA / Master / Olive に自動で振りわけます。その請求月に保存（同じカード・同じ請求月は置きかえ）。</span></div>
     <div class="zones" id="zones-card"></div>
     <div id="report-card"></div>
   </section>
@@ -244,7 +246,7 @@ function localHasData() {
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
-  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 2600);
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), Math.min(9000, 2600 + msg.length * 40));
 }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => Math.round(n).toLocaleString('ja-JP');
@@ -618,7 +620,7 @@ function wireZones(box) {
     fi.onchange = () => { dropInto(id, [...fi.files], z); fi.value = ''; };
     z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
     z.ondragleave = () => z.classList.remove('over');
-    z.ondrop = e => { e.preventDefault(); z.classList.remove('over'); dropInto(id, [...e.dataTransfer.files], z); };
+    z.ondrop = e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); dropInto(id, [...e.dataTransfer.files], z); };
     const clr = z.querySelector('.clr');
     if (clr) clr.onclick = async () => {
       if (!confirm(`${id === 'MF' ? 'マネーフォワード' : id} の ${claimLabel(sel[mode])} 分を消しますか？`)) return;
@@ -647,33 +649,21 @@ async function dropInto(id, files, zoneEl) {
       sel.mf = claims[claims.length - 1];
       toast(`マネーフォワード: ${rows.length}件を ${claims.map(claimLabel).join('・')} に保存` + (skipped ? `（対象外の口座 ${skipped}件は除外）` : ''));
     } else {
-      const byClaim = new Map();
+      // The card comes from the file name (…v.csv / …m.csv / …o.csv) when it has that suffix,
+      // otherwise from the box it was dropped on. id is null for a drop outside the boxes.
+      const groups = new Map(), unknown = [], moved = [];
       for (const f of files) {
-        const p = parseCardCSV(parseCSV(decode(await f.arrayBuffer())), id);
-        if (!p.rows.length) { toast(`${f.name}: 明細の行が見つかりませんでした`); continue; }
-        const claim = claimOf(p, f.name);
-        const g = byClaim.get(claim) || { rows: [], kinds: new Set(), bill: null, files: [] };
-        g.rows.push(...p.rows.map(r => ({ ...r, source: id, claim })));
-        g.kinds.add(p.kind);
-        if (p.billTotal !== null) g.bill = (g.bill || 0) + p.billTotal;
-        g.files.push(f.name);
-        byClaim.set(claim, g);
+        const card = cardFromFileName(f.name) || id;
+        if (!card) { unknown.push(f.name); continue; }
+        if (id && card !== id) moved.push(`${f.name} → ${card}`);
+        if (!groups.has(card)) groups.set(card, []);
+        groups.get(card).push(f);
       }
-      if (!byClaim.size) return;
-      const claims = [...byClaim.keys()].sort();
-      const rows = [], imports = [];
-      for (const c of claims) {
-        const g = byClaim.get(c);
-        rows.push(...g.rows);
-        const sum = g.rows.reduce((a, r) => a + r.amount, 0);
-        imports.push({ source: id, claim: c, kind: g.kinds.size > 1 ? 'mixed' : [...g.kinds][0], bill_total: g.bill, row_sum: Math.round(sum), row_count: g.rows.length, file_name: g.files.join(', ') });
-      }
-      await replaceStatements(id, claims, rows, imports);
-      sel.card = claims[claims.length - 1];
-      toast(imports.map(i => {
-        const check = i.bill_total == null ? '' : i.bill_total === i.row_sum ? '・ご請求額と一致✓' : `・⚠ご請求額${fmt(i.bill_total)}円とズレ`;
-        return `${id} ${claimLabel(i.claim)}請求分（${KIND_LABEL[i.kind]}）${i.row_count}件${check}`;
-      }).join(' / '));
+      const msgs = [];
+      for (const card of CARD_ZONES.filter(c => groups.has(c))) msgs.push(...await importCardFiles(card, groups.get(card)));
+      if (moved.length) msgs.push(`ファイル名で振りわけ: ${moved.join(', ')}`);
+      if (unknown.length) msgs.push(`どのカードかわからないので取りこみませんでした: ${unknown.join(', ')}（ファイル名の最後を v / m / o にするか、箱にドロップしてね）`);
+      if (msgs.length) toast(msgs.join(' / '));
     }
     view.card.pick = view.mf.pick = null;
   } catch (e) {
@@ -682,6 +672,45 @@ async function dropInto(id, files, zoneEl) {
     zoneEl.classList.remove('busy');
     render();
   }
+}
+
+// "202611v.csv" -> VISA, "202611 m.csv" -> Mastercard, "202611_O.csv" -> Olive (last letter before the extension)
+const SUFFIX_CARD = { v: 'VISA', m: 'Mastercard', o: 'Olive' };
+function cardFromFileName(name) {
+  const base = String(name).normalize('NFKC').replace(/\.[^.]*$/, '').trim();
+  return SUFFIX_CARD[base.slice(-1).toLowerCase()] || null;
+}
+
+async function importCardFiles(id, files) {
+  const msgs = [];
+  const byClaim = new Map();
+  for (const f of files) {
+    const p = parseCardCSV(parseCSV(decode(await f.arrayBuffer())), id);
+    if (!p.rows.length) { msgs.push(`${f.name}: 明細の行が見つかりませんでした`); continue; }
+    const claim = claimOf(p, f.name);
+    const g = byClaim.get(claim) || { rows: [], kinds: new Set(), bill: null, files: [] };
+    g.rows.push(...p.rows.map(r => ({ ...r, source: id, claim })));
+    g.kinds.add(p.kind);
+    if (p.billTotal !== null) g.bill = (g.bill || 0) + p.billTotal;
+    g.files.push(f.name);
+    byClaim.set(claim, g);
+  }
+  if (!byClaim.size) return msgs;
+  const claims = [...byClaim.keys()].sort();
+  const rows = [], imports = [];
+  for (const c of claims) {
+    const g = byClaim.get(c);
+    rows.push(...g.rows);
+    const sum = g.rows.reduce((a, r) => a + r.amount, 0);
+    imports.push({ source: id, claim: c, kind: g.kinds.size > 1 ? 'mixed' : [...g.kinds][0], bill_total: g.bill, row_sum: Math.round(sum), row_count: g.rows.length, file_name: g.files.join(', ') });
+  }
+  await replaceStatements(id, claims, rows, imports);
+  const last = claims[claims.length - 1];
+  if (!sel.card || last > sel.card) sel.card = last;
+  return msgs.concat(imports.map(i => {
+    const check = i.bill_total == null ? '' : i.bill_total === i.row_sum ? '・ご請求額と一致✓' : `・⚠ご請求額${fmt(i.bill_total)}円とズレ`;
+    return `${id} ${claimLabel(i.claim)}請求分（${KIND_LABEL[i.kind]}）${i.row_count}件${check}`;
+  }));
 }
 
 function blockHTML(b, avgHead, totalDays) {
@@ -1029,6 +1058,16 @@ function render() {
   if (tab === 'master') renderMaster();
   renderAccount(); renderNotice(); updateBadge();
 }
+
+// Card tab: drop several CSVs anywhere (not just on a box); each goes to the card named by its file-name suffix.
+const cardPane = document.getElementById('pane-card');
+cardPane.addEventListener('dragover', e => { e.preventDefault(); cardPane.classList.add('over'); });
+cardPane.addEventListener('dragleave', e => { if (!cardPane.contains(e.relatedTarget)) cardPane.classList.remove('over'); });
+cardPane.addEventListener('drop', e => {
+  e.preventDefault(); cardPane.classList.remove('over');
+  dropInto(null, [...e.dataTransfer.files], cardPane);
+});
+document.getElementById('bulkCard').onchange = e => { dropInto(null, [...e.target.files], cardPane); e.target.value = ''; };
 
 // Keep the browser from opening a file dropped outside a zone.
 window.addEventListener('dragover', e => e.preventDefault());
