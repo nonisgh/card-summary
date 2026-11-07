@@ -60,6 +60,16 @@
   details.admin summary { cursor: pointer; color: var(--muted); }
   details.admin > div { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .db th { background: var(--head); text-align: center; position: sticky; top: 0; }
+  .ytable { overflow-x: auto; margin: 8px 0 12px; }
+  .ytable table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ytable th, .ytable td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+  .ytable th:first-child, .ytable td:first-child { text-align: left; font-weight: 700; position: sticky; left: 0; background: var(--card); }
+  .ytable thead th { background: var(--head); }
+  .ytable td.sum { font-weight: 800; background: var(--sub); }
+  .ytable tr.all td { background: var(--total); font-weight: 800; }
+  .ytable td.empty { color: var(--muted); }
+  .ytable td[data-go] { cursor: pointer; } .ytable td[data-go]:hover { text-decoration: underline; }
+  .db tr.year td { background: var(--total); font-weight: 800; border-top: 3px solid var(--line); }
   .db tr.month td { background: var(--sub); font-weight: 700; border-top: 2px solid var(--line); }
   .monthbar select { font-weight: 700; }
 
@@ -198,6 +208,7 @@
         <button class="btn" id="dbCopy">コピー</button><button class="btn" id="dbCsv">CSVで保存</button>
       </div>
       <div class="muted" id="dbSum"></div>
+      <div class="ytable" id="dbYears"></div>
       <div class="scroll" id="dbBox"></div>
     </div>
     <details class="admin"><summary>管理（データをぜんぶ消す）</summary>
@@ -1258,15 +1269,23 @@ function renderDB() {
   for (const k of [...dbSel]) if (!shownKeys.has(k)) dbSel.delete(k);
   const updDel = () => { $('dbDel').disabled = !dbSel.size; $('dbDel').textContent = dbSel.size ? `🗑 選んだ明細を消す（${dbSel.size}件）` : '🗑 選んだ明細を消す'; };
   updDel();
+  $('dbYears').innerHTML = yearTableHTML(list, mode);
+  $('dbYears').querySelectorAll('[data-go]').forEach(td => td.onclick = () =>
+    $('dbBox').querySelector(`tr[data-mrow="${td.dataset.go}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
   if (!list.length) { $('dbBox').innerHTML = '<p class="muted">あてはまる明細がありません。</p>'; return; }
   const classify = r => [...all.axisNames.map(a => r.cats[a]).filter(c => c && c !== OTHER), ...r.tags.map(t => '#' + t)].join('・');
   const checked = keys => keys.length && keys.every(k => dbSel.has(k));
-  let html = '', cur = null;
+  let html = '', cur = null, curY = null;
   for (const r of list) {
+    if (r.claim.slice(0, 4) !== curY) {
+      curY = r.claim.slice(0, 4);
+      const ys = list.filter(x => x.claim.startsWith(curY)), n = new Set(ys.map(x => x.claim)).size, yt = ys.reduce((a, x) => a + x.amount, 0);
+      html += `<tr class="year"><td></td><td colspan="2">${curY}年の合計（${ys.length}件・${n}か月・月平均 ${fmt(Math.round(yt / n))}円）</td><td class="n">${fmt(yt)}</td><td colspan="2"></td></tr>`;
+    }
     if (r.claim !== cur) {
       cur = r.claim;
       const ms = list.filter(x => x.claim === cur);
-      html += `<tr class="month"><td><label><input type="checkbox" data-month="${cur}" ${checked(ms.map(x => x.k)) ? 'checked' : ''}> この月</label></td>
+      html += `<tr class="month" data-mrow="${cur}"><td><label><input type="checkbox" data-month="${cur}" ${checked(ms.map(x => x.k)) ? 'checked' : ''}> この月</label></td>
         <td colspan="2">${claimLabel(cur)}${mode === 'card' ? '請求分' : ''}（${ms.length}件）</td><td class="n">${fmt(ms.reduce((a, x) => a + x.amount, 0))}</td><td colspan="2"></td></tr>`;
     }
     html += `<tr class="${r.reg ? '' : 'unreg'}"><td style="text-align:center"><input type="checkbox" data-k="${r.k}" ${dbSel.has(r.k) ? 'checked' : ''}></td><td>${r.date.replace(/-/g, '/')}</td>
@@ -1284,6 +1303,28 @@ function renderDB() {
     renderDB();
   });
   box.querySelector('[data-allk]').onchange = e => { for (const k of shownKeys) e.target.checked ? dbSel.add(k) : dbSel.delete(k); renderDB(); };
+}
+// Years down, months across: each month's total, the year's total and monthly average, and the whole period.
+function yearTableHTML(list, mode) {
+  if (!list.length) return '';
+  const byMonth = new Map();
+  for (const r of list) byMonth.set(r.claim, (byMonth.get(r.claim) || 0) + r.amount);
+  const years = [...new Set([...byMonth.keys()].map(c => c.slice(0, 4)))].sort().reverse();
+  const row = (label, cells, sum, n, cls = '') =>
+    `<tr class="${cls}"><td>${label}</td><td class="sum">${fmt(sum)}</td><td>${n ? fmt(Math.round(sum / n)) : ''}</td><td>${n}か月</td>${cells}</tr>`;
+  const body = years.map(y => {
+    let sum = 0, n = 0;
+    const cells = Array.from({ length: 12 }, (_, i) => {
+      const c = `${y}-${pad2(i + 1)}`;
+      if (!byMonth.has(c)) return '<td class="empty">—</td>';
+      sum += byMonth.get(c); n++;
+      return `<td data-go="${c}" title="${claimLabel(c)}の明細へ">${fmt(byMonth.get(c))}</td>`;
+    }).join('');
+    return row(`${y}年`, cells, sum, n);
+  }).join('');
+  const all = [...byMonth.values()].reduce((a, v) => a + v, 0);
+  return `<table><thead><tr><th>${mode === 'card' ? '請求月' : '利用月'}</th><th>合計</th><th>月平均</th><th></th>${Array.from({ length: 12 }, (_, i) => `<th>${i + 1}月</th>`).join('')}</tr></thead><tbody>${body}
+    ${row('全期間', '<td colspan="12"></td>', all, byMonth.size, 'all')}</tbody></table>`;
 }
 const dbSel = new Set();
 document.getElementById('dbDel').onclick = () => deleteLines(new Set(dbSel));
