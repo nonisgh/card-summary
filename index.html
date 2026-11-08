@@ -578,7 +578,7 @@ async function cloudLoad(keepView = false) {
 // Coming back to the page (another app, another tab, phone unlocked): pick up changes made on other devices.
 // Skipped while something is still being saved, so a pending master edit is never overwritten by older data.
 function refreshIfStale() {
-  if (!user || loading || cloud === 'busy' || masterTimer || Date.now() - lastLoad < 15000) return;
+  if (!user || moving || loading || cloud === 'busy' || masterTimer || Date.now() - lastLoad < 15000) return;
   cloudLoad(true);
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshIfStale(); });
@@ -637,6 +637,7 @@ function renderAccount() {
 }
 function renderNotice() {
   const box = document.getElementById('notice');
+  if (moving) return; // keep the move-over panel (and its question) as it is while moving
   box.innerHTML = (user && localHasData()
     ? `<div class="notice">このブラウザに、ログイン前のデータが残っています。<button class="btn" id="upl">クラウドに送る</button><button class="btn" id="dropLocal">消す</button></div>` : '') +
     (user && cloud === 'on' && !state.imports.length && !(state.snapshots || []).length && window.supabase ? movePanelHTML() : '');
@@ -1691,6 +1692,18 @@ if (window.firebase) {
 // ===== Move over from Supabase (the earlier version) =====
 // Shown while signed in with nothing in Firebase yet. Signs in to the old Supabase account just to read,
 // copies master / statements / records into Firebase, then signs out of Supabase again.
+// A yes/no question shown inside `box`. Resolves true for the yes button, false for やめる.
+function askOnPage(box, text, yes) {
+  return new Promise(resolve => {
+    const q = document.createElement('div');
+    q.style.marginTop = '8px';
+    q.innerHTML = `<b>${esc(text)}</b><br><button class="btn primary">${esc(yes)}</button> <button class="btn">やめる</button>`;
+    const [y, n] = q.querySelectorAll('button');
+    y.onclick = () => { q.remove(); resolve(true); };
+    n.onclick = () => { q.remove(); resolve(false); };
+    box.appendChild(q);
+  });
+}
 function movePanelHTML() {
   return `<div class="notice" id="movePanel"><b>Supabase（前のバージョン）からデータを引っこす</b><br>
     <span class="muted">前にメールとパスワードでログインしていたアカウントで、Supabaseからぜんぶ読みこんで、こちらにコピーします（Supabaseのデータは消えません）。</span><br>
@@ -1706,8 +1719,11 @@ function wireMovePanel(box) {
   go.onclick = run;
   pw.onkeydown = e => { if (e.key === 'Enter') run(); };
 }
+var moving = false; // var: read by renderNotice, which runs before this line on first load
 async function moveFromSupabase(email, password, btn) {
   if (!email || !password) { toast('Supabaseのメールとパスワードを入れてね'); return; }
+  if (moving) return;
+  moving = true;
   const old = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
   btn.disabled = true; btn.textContent = '読みこみ中…';
   try {
@@ -1731,7 +1747,11 @@ async function moveFromSupabase(email, password, btn) {
     let snaps = [];
     try { snaps = await all('cc_snapshots', 'mode,claim,data,saved_at'); } catch (e) { console.warn('cc_snapshots', e); }
     await old.auth.signOut();
-    if (!confirm(`Supabaseから読みこみました：\n明細 ${tx.length}件・カード/MFの月 ${imports.length}件・月の記録 ${snaps.length}件・マスタ ${m.data?.data?.rows?.length || 0}行\n\nFirebaseにコピーしますか？`)) return;
+    // Ask on the page, not with confirm(): some browsers (and embedded views) suppress dialogs.
+    const ok = await askOnPage(document.getElementById('movePanel'),
+      `Supabaseから読みこみました：明細 ${tx.length}件・カード/MFの月 ${imports.length}件・月の記録 ${snaps.length}件・マスタ ${m.data?.data?.rows?.length || 0}行。Firebaseにコピーしますか？`,
+      'コピーする');
+    if (!ok) return;
     btn.textContent = 'コピー中…';
     state = { master: m.data?.data?.axes ? m.data.data : state.master, tx, imports, snapshots: snaps.map(x => ({ mode: x.mode, claim: x.claim, data: x.data, saved_at: x.saved_at })) };
     await cloudWrite(async () => {
@@ -1744,7 +1764,7 @@ async function moveFromSupabase(email, password, btn) {
     await cloudLoad();
   } catch (e) {
     console.error(e); toast(e.message || String(e));
-  } finally { btn.disabled = false; btn.textContent = '引っこす'; render(); }
+  } finally { moving = false; btn.disabled = false; btn.textContent = '引っこす'; render(); }
 }
 render();
 </script>
