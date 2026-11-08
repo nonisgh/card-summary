@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>カード明細集計</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='%231a4fa0'/%3E%3Crect x='9' y='13' width='38' height='25' rx='4' fill='%23fff'/%3E%3Crect x='9' y='18' width='38' height='5' fill='%239fb7dc'/%3E%3Crect x='13' y='28' width='8' height='5' rx='1.5' fill='%23f2c94c'/%3E%3Crect x='30' y='31' width='27' height='24' rx='5' fill='%23fff'/%3E%3Crect x='34' y='43' width='5' height='9' rx='1.5' fill='%23e2582b'/%3E%3Crect x='41' y='38' width='5' height='14' rx='1.5' fill='%231a4fa0'/%3E%3Crect x='48' y='34' width='5' height='18' rx='1.5' fill='%234f8a3c'/%3E%3C/svg%3E">
 <script>
 // The app now lives on Firebase Hosting; the GitHub Pages copy forwards there (Google login only works there).
 if (location.hostname === 'nonisgh.github.io') location.replace('https://card-summary-nonis.web.app/' + location.search + location.hash);
@@ -33,7 +34,8 @@ if (location.hostname === 'nonisgh.github.io') location.replace('https://card-su
          padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 32px); }
   main { max-width: 1200px; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0 10px; }
-  h1 { font-size: 20px; margin: 0; }
+  h1 { font-size: 20px; margin: 0; display: flex; align-items: center; gap: 8px; }
+  h1 .logo { width: 28px; height: 28px; flex: none; }
   button, input, select, textarea { font: inherit; color: inherit; }
   input[type=text], input[type=email], input[type=password], select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
   .btn { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 11px; cursor: pointer; font-size: 13px; }
@@ -169,7 +171,7 @@ if (location.hostname === 'nonisgh.github.io') location.replace('https://card-su
 <body>
 <main>
   <header>
-    <h1>💳 カード明細集計</h1>
+    <h1><svg class="logo" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="2" y="2" width="60" height="60" rx="15" fill="#1a4fa0"/><rect x="9" y="13" width="38" height="25" rx="4" fill="#fff"/><rect x="9" y="18" width="38" height="5" fill="#9fb7dc"/><rect x="13" y="28" width="8" height="5" rx="1.5" fill="#f2c94c"/><rect x="30" y="31" width="27" height="24" rx="5" fill="#fff"/><rect x="34" y="43" width="5" height="9" rx="1.5" fill="#e2582b"/><rect x="41" y="38" width="5" height="14" rx="1.5" fill="#1a4fa0"/><rect x="48" y="34" width="5" height="18" rx="1.5" fill="#4f8a3c"/></svg>カード明細集計</h1>
     <div class="account" id="account"></div>
   </header>
   <div id="notice"></div>
