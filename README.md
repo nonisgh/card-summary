@@ -3,11 +3,13 @@
 三井住友カード（VISA / Mastercard / Olive）と マネーフォワード ME の CSV をドロップして、
 自分で決めた種別マスタで集計する HTML 1 枚のアプリ。
 
-- 公開URL: https://nonisgh.github.io/card-summary/
+- 公開URL: https://card-summary-nonis.web.app/ （Firebase Hosting。`firebase deploy --only hosting:card-summary-nonis` で公開）
+  - GitHub Pages にも置いてある: https://nonisgh.github.io/card-summary/
 - データは Firebase（プロジェクト `nonis-apps`、ab-editor と共用）の Firestore。Google でログインする。
   - 置き場所は `apps/card-summary/users/{uid}/` の下：`statements/{カード}_{月}`（その月の明細を JSON でまとめて 1 件）、`snapshots/{card|mf}_{月}`（月の記録）、`settings/master`（種別マスタ）。
   - `firestore.rules`（ab-editor のリポジトリにある、プロジェクト共通のルール）で、本人しか読み書きできない。
-  - GitHub Pages から Google ログインするには、Firebase コンソール → Authentication → 設定 → 承認済みドメイン に `nonisgh.github.io` を入れておく。
+  - Google ログインするには、Firebase コンソール → Authentication → 設定 → 承認済みドメイン に、そのページのドメイン（`card-summary-nonis.web.app`・`nonisgh.github.io`）を入れておく。
+  - Firestore のルールはこのリポジトリからはデプロイしない（ab-editor のリポジトリの `firestore.rules` がプロジェクト共通）。
 - 前のバージョンは Supabase（`supabase.sql`）。Firebase にまだ何もないときは、画面の「Supabase から引っこす」でまるごとコピーできる。
 - ログインしていないときは、そのブラウザ（localStorage）だけに保存する。
 
