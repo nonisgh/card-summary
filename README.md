@@ -4,8 +4,11 @@
 自分で決めた種別マスタで集計する HTML 1 枚のアプリ。
 
 - 公開URL: https://nonisgh.github.io/card-summary/
-- データは Supabase（`cc_master` / `cc_imports` / `cc_tx`）。RLS でログインした本人の行だけ読み書きできる。
-- テーブルは `supabase.sql` を Supabase の SQL Editor で 1 回実行して作る。
+- データは Firebase（プロジェクト `nonis-apps`、ab-editor と共用）の Firestore。Google でログインする。
+  - 置き場所は `apps/card-summary/users/{uid}/` の下：`statements/{カード}_{月}`（その月の明細を JSON でまとめて 1 件）、`snapshots/{card|mf}_{月}`（月の記録）、`settings/master`（種別マスタ）。
+  - `firestore.rules`（ab-editor のリポジトリにある、プロジェクト共通のルール）で、本人しか読み書きできない。
+  - GitHub Pages から Google ログインするには、Firebase コンソール → Authentication → 設定 → 承認済みドメイン に `nonisgh.github.io` を入れておく。
+- 前のバージョンは Supabase（`supabase.sql`）。Firebase にまだ何もないときは、画面の「Supabase から引っこす」でまるごとコピーできる。
 - ログインしていないときは、そのブラウザ（localStorage）だけに保存する。
 
 ## CSV

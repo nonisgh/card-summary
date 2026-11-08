@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>カード明細集計</title>
+<script src="https://www.gstatic.com/firebasejs/13.2.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/13.2.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/13.2.0/firebase-firestore-compat.js"></script>
+<!-- Supabase: only used to move data over from the old version (「Supabaseから引っこし」) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
   :root {
@@ -274,6 +278,18 @@
 
 <script>
 // ===== Settings =====
+// Firebase project "nonis-apps" (shared with ab-editor). These values are public; access is limited by
+// firestore.rules: apps/{appId}/users/{uid}/** can only be read and written by that signed-in user.
+const FB_CONFIG = {
+  apiKey: 'AIzaSyDEH-m5Wx31Azw3aHAO3-IEK6NyAGpP9_k',
+  authDomain: 'nonis-apps.firebaseapp.com',
+  projectId: 'nonis-apps',
+  storageBucket: 'nonis-apps.firebasestorage.app',
+  messagingSenderId: '331956814281',
+  appId: '1:331956814281:web:a6e091e3a95098c492a818',
+};
+const APP_ID = 'card-summary';
+// Old storage (Supabase, kaimono project): read only, to move existing data into Firebase.
 const SB_URL = 'https://kfslyphplctdfjiwsjut.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtmc2x5cGhwbGN0ZGZqaXdzanV0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5NDkzMjQsImV4cCI6MjA5NjUyNTMyNH0.EAo76m7MLbeLFYZvAQVb6zMfzYlovMbCS_6wefYzsYQ';
 const CARD_ZONES = ['Mastercard', 'VISA', 'Olive'];
@@ -295,10 +311,10 @@ let state = loadLocal();
 let tab = 'card';
 let sel = { card: null, mf: null };
 const view = { card: { q: '', only: false, pick: null }, mf: { q: '', only: false, pick: null } };
-let sb = null, user = null, cloud = 'off'; // off | on | busy | err
+let fdb = null, fauth = null, user = null, cloud = 'off'; // off | on | busy | err
 
 function emptyState() { return { master: { axes: ['種別'], rows: [] }, tx: [], imports: [], snapshots: [] }; }
-let snapsMissing = false; // signed in, but the cc_snapshots table has not been created yet
+const snapsMissing = false; // (Supabase era: the snapshots table could be missing. Firestore needs no setup.)
 function loadLocal() {
   try {
     const v = JSON.parse(localStorage.getItem(KEY));
@@ -309,7 +325,7 @@ function loadLocal() {
   return emptyState();
 }
 function saveLocal() {
-  if (user) return; // signed in: data lives in Supabase, not in this browser
+  if (user) return; // signed in: data lives in Firebase, not in this browser
   try { localStorage.setItem(KEY, JSON.stringify(state)); }
   catch { toast('ブラウザに保存できませんでした'); }
 }
@@ -436,32 +452,51 @@ function applyReplace(source, claims, rows, imports) {
   state.tx = state.tx.filter(t => !(t.source === source && claims.includes(t.claim))).concat(rows);
   state.imports = state.imports.filter(i => !(i.source === source && claims.includes(i.claim))).concat(imports);
 }
-async function replaceStatements(source, claims, rows, imports) {
-  if (user) {
-    setCloud('busy');
-    const { error } = await sb.rpc('cc_replace_statement', {
-      p_source: source, p_claims: claims,
-      p_rows: rows.map(r => ({ claim: r.claim, label: r.label, date: r.date, store: r.store, amount: Math.round(r.amount) })),
-      p_imports: imports,
-    });
-    if (error) { setCloud('err'); throw error; }
-    // Read the stored lines back so they carry their database ids (needed to delete single lines).
-    const back = await sb.from('cc_tx').select('id,source,claim,label,use_date,store,amount').eq('source', source).in('claim', claims).order('id');
-    if (!back.error) rows = back.data.map(fromDb);
-    setCloud('on');
+// ===== Firestore layout (all under apps/card-summary/users/{uid}/) =====
+// statements/{source}_{claim}: one card's (or MF's) month — the import info plus its lines as JSON.
+//   One document per month keeps page loads cheap (a few reads, not one per line) and makes
+//   replacing a month a single write.
+// snapshots/{mode}_{claim}: the month's record (JSON).   settings/master: the 種別マスタ (JSON).
+const userCol = name => fdb.collection('apps').doc(APP_ID).collection('users').doc(user.uid).collection(name);
+const stmtId = (source, claim) => `${source}_${claim}`;
+function stmtDoc(imp, rows) {
+  return {
+    source: imp.source, claim: imp.claim, kind: imp.kind ?? null, bill_total: imp.bill_total ?? null,
+    row_sum: imp.row_sum ?? 0, row_count: imp.row_count ?? rows.length, file_name: imp.file_name ?? '',
+    imported_at: imp.imported_at || new Date().toISOString(),
+    rows: JSON.stringify(rows.map(r => ({ label: r.label, date: r.date, store: r.store, amount: Math.round(r.amount) }))),
+  };
+}
+// Write many documents in batches (Firestore allows 500 writes per batch).
+async function commitOps(ops) {
+  for (let i = 0; i < ops.length; i += 450) {
+    const b = fdb.batch();
+    for (const op of ops.slice(i, i + 450)) op.data ? b.set(op.ref, op.data) : b.delete(op.ref);
+    await b.commit();
   }
+}
+// Write the given sources' months as they are in `state` now (deleting the ones that are gone).
+async function writeStatements(pairs) {
+  const ops = pairs.map(([source, claim]) => {
+    const ref = userCol('statements').doc(stmtId(source, claim));
+    const imp = state.imports.find(i => i.source === source && i.claim === claim);
+    return { ref, data: imp ? stmtDoc(imp, state.tx.filter(t => t.source === source && t.claim === claim)) : null };
+  });
+  await commitOps(ops);
+}
+async function cloudWrite(fn) {
+  setCloud('busy');
+  try { await fn(); setCloud('on'); }
+  catch (e) { setCloud('err'); throw e; }
+}
+async function replaceStatements(source, claims, rows, imports) {
   applyReplace(source, claims, rows, imports);
+  if (user) await cloudWrite(() => writeStatements(claims.map(c => [source, c])));
   saveLocal();
 }
-const fromDb = r => ({ id: r.id, k: 'id' + r.id, source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount });
 async function deleteStatement(source, claim) {
-  if (user) {
-    setCloud('busy');
-    const { error } = await sb.rpc('cc_delete_statement', { p_source: source, p_claim: claim });
-    if (error) { setCloud('err'); throw error; }
-    setCloud('on');
-  }
   applyReplace(source, [claim], [], []);
+  if (user) await cloudWrite(() => userCol('statements').doc(stmtId(source, claim)).delete());
   saveLocal();
 }
 let masterTimer = null;
@@ -470,30 +505,21 @@ function saveMaster() {
   clearTimeout(masterTimer);
   setCloud('busy');
   masterTimer = setTimeout(async () => {
-    const { error } = await sb.from('cc_master').upsert({ user_id: user.id, data: state.master, updated_at: new Date().toISOString() });
+    try {
+      await userCol('settings').doc('master').set({ json: JSON.stringify(state.master), updated_at: new Date().toISOString() });
+      setCloud('on');
+    } catch (e) { setCloud('err'); toast('マスタをクラウドに保存できませんでした'); console.error(e); }
     masterTimer = null; // saved (or failed): nothing pending any more
-    if (error) { setCloud('err'); toast('マスタをクラウドに保存できませんでした'); console.error(error); }
-    else setCloud('on');
   }, 800);
 }
 
 async function saveSnapshot(mode, claim, data, savedAt = new Date().toISOString()) {
-  if (user) {
-    setCloud('busy');
-    const { error } = await sb.from('cc_snapshots').upsert({ user_id: user.id, mode, claim, data, saved_at: savedAt });
-    if (error) { setCloud('err'); throw error; }
-    setCloud('on');
-  }
+  if (user) await cloudWrite(() => userCol('snapshots').doc(`${mode}_${claim}`).set({ mode, claim, saved_at: savedAt, json: JSON.stringify(data) }));
   state.snapshots = (state.snapshots || []).filter(s => !(s.mode === mode && s.claim === claim)).concat({ mode, claim, data, saved_at: savedAt });
   saveLocal();
 }
 async function deleteSnapshot(mode, claim) {
-  if (user) {
-    setCloud('busy');
-    const { error } = await sb.from('cc_snapshots').delete().eq('mode', mode).eq('claim', claim);
-    if (error) { setCloud('err'); throw error; }
-    setCloud('on');
-  }
+  if (user) await cloudWrite(() => userCol('snapshots').doc(`${mode}_${claim}`).delete());
   state.snapshots = (state.snapshots || []).filter(s => !(s.mode === mode && s.claim === claim));
   saveLocal();
 }
@@ -524,28 +550,23 @@ async function cloudLoad(keepView = false) {
   loading = true;
   setCloud('busy');
   try {
-    const [m, im] = await Promise.all([
-      sb.from('cc_master').select('data').maybeSingle(),
-      sb.from('cc_imports').select('source,claim,kind,bill_total,row_sum,row_count,file_name'),
-    ]);
-    if (m.error) throw m.error;
-    if (im.error) throw im.error;
-    const tx = [];
-    for (let from = 0; ; from += 1000) { // PostgREST returns at most 1000 rows per request
-      const { data, error } = await sb.from('cc_tx').select('id,source,claim,label,use_date,store,amount').order('id').range(from, from + 999);
-      if (error) throw error;
-      tx.push(...data.map(fromDb));
-      if (data.length < 1000) break;
-    }
-    // Saved summaries live in a table added later; the app still works if it does not exist yet.
-    const sn = await sb.from('cc_snapshots').select('mode,claim,data,saved_at');
-    snapsMissing = !!sn.error;
-    if (sn.error) console.warn('cc_snapshots:', sn.error.message);
-    state = { master: m.data?.data?.axes ? m.data.data : emptyState().master, tx, imports: im.data, snapshots: sn.data || [] };
+    const [m, st, sn] = await Promise.all([userCol('settings').doc('master').get(), userCol('statements').get(), userCol('snapshots').get()]);
+    const tx = [], imports = [];
+    st.forEach(d => {
+      const v = d.data();
+      const { rows, ...imp } = v;
+      imports.push(imp);
+      JSON.parse(rows || '[]').forEach((r, n) => tx.push({ k: `${v.source}|${v.claim}|${n}`, source: v.source, claim: v.claim, ...r }));
+    });
+    const snapshots = [];
+    sn.forEach(d => { const v = d.data(); snapshots.push({ mode: v.mode, claim: v.claim, saved_at: v.saved_at, data: JSON.parse(v.json) }); });
+    const master = m.exists ? JSON.parse(m.data().json) : null;
+    state = { master: master?.axes ? master : emptyState().master, tx, imports, snapshots };
+    dbSel.clear(); // line keys are positions within a month, so a selection would not survive a reload
     setCloud('on');
   } catch (e) {
     console.error(e); setCloud('err');
-    toast('クラウドから読みこめませんでした（テーブルを作るSQLは実行ずみ？）');
+    toast('クラウドから読みこめませんでした: ' + (e.message || e));
   }
   loading = false;
   lastLoad = Date.now();
@@ -587,36 +608,39 @@ async function uploadLocal() {
 function setCloud(s) { cloud = s; renderAccount(); }
 function renderAccount() {
   const box = document.getElementById('account');
-  if (!sb) { box.innerHTML = '<span class="cloud off">オフライン（このブラウザだけに保存）</span>'; return; }
+  if (!fauth) { box.innerHTML = '<span class="cloud off">オフライン（このブラウザだけに保存）</span>'; return; }
   if (user) {
     const label = { on: '☁ クラウドに保存ずみ', busy: '☁ 保存中…', err: '⚠ クラウドエラー', off: '' }[cloud];
     box.innerHTML = `<span class="cloud ${cloud === 'err' ? 'err' : 'on'}">${label}</span>
       <button class="btn" id="reload" title="ほかの端末で入れたデータを読みこむ（ページにもどったときは自動）" ${cloud === 'busy' ? 'disabled' : ''}>🔄</button>
-      <span class="who">${esc(user.email)}</span><button class="btn" id="logout">ログアウト</button>`;
-    box.querySelector('#logout').onclick = async () => { await sb.auth.signOut(); };
+      <span class="who">${esc(user.email || user.displayName || '')}</span><button class="btn" id="logout">ログアウト</button>`;
+    box.querySelector('#logout').onclick = () => fauth.signOut();
     box.querySelector('#reload').onclick = () => cloudLoad(true);
   } else {
     box.innerHTML = `<span class="cloud off">ログインしていません（このブラウザだけに保存）</span>
-      <input type="email" id="em" placeholder="メール" autocomplete="username" size="18">
-      <input type="password" id="pw" placeholder="パスワード" autocomplete="current-password" size="12">
-      <button class="btn primary" id="login">ログイン</button><button class="btn" id="signup">新規登録</button>`;
-    const em = box.querySelector('#em'), pw = box.querySelector('#pw');
-    const go = async signup => {
-      if (!em.value || !pw.value) { toast('メールとパスワードを入れてね'); return; }
-      const fn = signup ? sb.auth.signUp.bind(sb.auth) : sb.auth.signInWithPassword.bind(sb.auth);
-      const { data, error } = await fn({ email: em.value.trim(), password: pw.value });
-      if (error) { toast((signup ? '登録' : 'ログイン') + 'できませんでした: ' + error.message); return; }
-      if (signup && !data.session) toast('確認メールを送りました。メールのリンクをひらいてからログインしてね');
+      <button class="btn primary" id="login">Googleでログイン</button>`;
+    box.querySelector('#login').onclick = async () => {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      try { await fauth.signInWithPopup(provider); }
+      catch (e) {
+        if (e?.code === 'auth/popup-blocked' || e?.code === 'auth/operation-not-supported-in-environment') await fauth.signInWithRedirect(provider);
+        else if (e?.code !== 'auth/popup-closed-by-user' && e?.code !== 'auth/cancelled-popup-request') {
+          console.error(e);
+          toast(e?.code === 'auth/unauthorized-domain'
+            ? 'このページのドメインがFirebaseで許可されていません（Authentication → 設定 → 承認済みドメイン に追加してね）'
+            : 'ログインできませんでした: ' + (e.message || e));
+        }
+      }
     };
-    box.querySelector('#login').onclick = () => go(false);
-    box.querySelector('#signup').onclick = () => go(true);
-    pw.onkeydown = e => { if (e.key === 'Enter') go(false); };
   }
 }
 function renderNotice() {
   const box = document.getElementById('notice');
-  box.innerHTML = user && localHasData()
-    ? `<div class="notice">このブラウザに、ログイン前のデータが残っています。<button class="btn" id="upl">クラウドに送る</button><button class="btn" id="dropLocal">消す</button></div>` : '';
+  box.innerHTML = (user && localHasData()
+    ? `<div class="notice">このブラウザに、ログイン前のデータが残っています。<button class="btn" id="upl">クラウドに送る</button><button class="btn" id="dropLocal">消す</button></div>` : '') +
+    (user && cloud === 'on' && !state.imports.length && !(state.snapshots || []).length && window.supabase ? movePanelHTML() : '');
+  wireMovePanel(box);
   const u = box.querySelector('#upl'); if (u) u.onclick = uploadLocal;
   const d = box.querySelector('#dropLocal'); if (d) d.onclick = () => {
     if (confirm('このブラウザに残っているログイン前のデータを消しますか？（クラウドのデータは消えません）')) { localStorage.removeItem(KEY); renderNotice(); }
@@ -1344,15 +1368,6 @@ async function deleteLines(keys) {
       (emptyMonths.length ? `\n${emptyMonths.map(mc => claimLabel(mc.split('|')[1])).join('・')} は明細がなくなるので、その月の記録も消えます。` : '') +
       '\n（同じCSVをもう一度入れると、もどります）')) return;
   try {
-    if (user) {
-      setCloud('busy');
-      const ids = del.map(t => t.id).filter(Boolean);
-      if (ids.length !== del.length) throw new Error('読みこみなおしが必要です（右上の🔄をおしてから、もう一度）');
-      for (let i = 0; i < ids.length; i += 200) {
-        const { error } = await sb.from('cc_tx').delete().in('id', ids.slice(i, i + 200));
-        if (error) throw error;
-      }
-    }
     state.tx = state.tx.filter(t => !keys.has(t.k));
     // Fix each affected statement's count/sum, or drop it if nothing is left.
     for (const [s, c] of pairs) {
@@ -1361,19 +1376,17 @@ async function deleteLines(keys) {
       if (!imp) continue;
       if (rs.length) {
         Object.assign(imp, { row_count: rs.length, row_sum: Math.round(rs.reduce((a, t) => a + t.amount, 0)) });
-        if (user) { const { error } = await sb.from('cc_imports').update({ row_count: imp.row_count, row_sum: imp.row_sum }).eq('source', s).eq('claim', c); if (error) throw error; }
       } else {
         state.imports = state.imports.filter(i => i !== imp);
-        if (user) { const { error } = await sb.from('cc_imports').delete().eq('source', s).eq('claim', c); if (error) throw error; }
       }
     }
+    if (user) await cloudWrite(() => writeStatements(pairs));
     for (const mc of emptyMonths) { const [m, c] = mc.split('|'); if ((state.snapshots || []).some(x => x.mode === m && x.claim === c)) await deleteSnapshot(m, c); }
-    if (user) setCloud('on');
     saveLocal();
     for (const m of ['card', 'mf']) await autoRecord(m, [...new Set(pairs.filter(([s]) => modeOf(s) === m).map(([, c]) => c))]);
     dbSel.clear();
     toast(`${del.length}件の明細を消しました`);
-  } catch (e) { console.error(e); setCloud('err'); toast('消せませんでした: ' + (e.message || e)); }
+  } catch (e) { console.error(e); toast('消せませんでした（🔄で読みこみなおしてね）: ' + (e.message || e)); }
   render();
 }
 ['dbSrc', 'dbCard', 'dbAxis', 'dbCat', 'dbTag'].forEach(id => document.getElementById(id).onchange = renderDB);
@@ -1390,15 +1403,11 @@ async function wipe(kind) {
   const note = kind === 'all' ? 'もとにもどせません。' : '月の記録は残るので、月ごとの画面で見返せます。';
   if (prompt(`${what}（明細 ${n}件）を消します。${note}\n本当に消すなら「けす」と入力してね。`)?.trim() !== 'けす') { toast('消すのをやめました'); return; }
   try {
-    if (user) {
-      setCloud('busy');
-      for (const [table, col] of [['cc_tx', 'source'], ['cc_imports', 'source']]) {
-        const { error } = await sb.from(table).delete().in(col, srcs);
-        if (error) throw error;
-      }
-      if (kind === 'all') { const { error } = await sb.from('cc_snapshots').delete().in('mode', ['card', 'mf']); if (error && !snapsMissing) throw error; }
-      setCloud('on');
-    }
+    if (user) await cloudWrite(async () => {
+      const ops = state.imports.filter(i => srcs.includes(i.source)).map(i => ({ ref: userCol('statements').doc(stmtId(i.source, i.claim)) }));
+      if (kind === 'all') (state.snapshots || []).forEach(x => ops.push({ ref: userCol('snapshots').doc(`${x.mode}_${x.claim}`) }));
+      await commitOps(ops);
+    });
     state.tx = state.tx.filter(t => !srcs.includes(t.source));
     state.imports = state.imports.filter(i => !srcs.includes(i.source));
     if (kind === 'all') state.snapshots = [];
@@ -1666,15 +1675,76 @@ window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => e.preventDefault());
 
 // ===== Start =====
-if (window.supabase && !SB_KEY.startsWith('__')) {
-  sb = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, storageKey: 'card-summary-auth' } });
-  sb.auth.onAuthStateChange((event, session) => {
-    const next = session?.user || null;
-    if (next?.id === user?.id) return; // token refresh etc.
-    user = next;
+if (window.firebase) {
+  firebase.initializeApp(FB_CONFIG);
+  fauth = firebase.auth();
+  fdb = firebase.firestore();
+  fauth.getRedirectResult().catch(e => { console.error(e); toast('ログインできませんでした: ' + (e.message || e)); });
+  fauth.onAuthStateChanged(u => {
+    if ((u?.uid || null) === (user?.uid || null)) return;
+    user = u;
     if (user) cloudLoad();
     else { state = loadLocal(); cloud = 'off'; sel = { card: null, mf: null }; render(); }
   });
+}
+
+// ===== Move over from Supabase (the earlier version) =====
+// Shown while signed in with nothing in Firebase yet. Signs in to the old Supabase account just to read,
+// copies master / statements / records into Firebase, then signs out of Supabase again.
+function movePanelHTML() {
+  return `<div class="notice" id="movePanel"><b>Supabase（前のバージョン）からデータを引っこす</b><br>
+    <span class="muted">前にメールとパスワードでログインしていたアカウントで、Supabaseからぜんぶ読みこんで、こちらにコピーします（Supabaseのデータは消えません）。</span><br>
+    <input type="email" id="mvEm" placeholder="Supabaseのメール" autocomplete="username" size="20">
+    <input type="password" id="mvPw" placeholder="パスワード" autocomplete="current-password" size="12">
+    <button class="btn primary" id="mvGo">引っこす</button></div>`;
+}
+function wireMovePanel(box) {
+  const go = box.querySelector('#mvGo');
+  if (!go) return;
+  const em = box.querySelector('#mvEm'), pw = box.querySelector('#mvPw');
+  const run = () => moveFromSupabase(em.value.trim(), pw.value, go);
+  go.onclick = run;
+  pw.onkeydown = e => { if (e.key === 'Enter') run(); };
+}
+async function moveFromSupabase(email, password, btn) {
+  if (!email || !password) { toast('Supabaseのメールとパスワードを入れてね'); return; }
+  const old = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  btn.disabled = true; btn.textContent = '読みこみ中…';
+  try {
+    const { error: le } = await old.auth.signInWithPassword({ email, password });
+    if (le) throw new Error('Supabaseにログインできませんでした: ' + le.message);
+    const all = async (table, cols) => {
+      const out = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await old.from(table).select(cols).order(table === 'cc_tx' ? 'id' : 'claim').range(from, from + 999);
+        if (error) throw error;
+        out.push(...data);
+        if (data.length < 1000) break;
+      }
+      return out;
+    };
+    const m = await old.from('cc_master').select('data').maybeSingle();
+    if (m.error) throw m.error;
+    const imports = await all('cc_imports', 'source,claim,kind,bill_total,row_sum,row_count,file_name,imported_at');
+    const tx = (await all('cc_tx', 'id,source,claim,label,use_date,store,amount'))
+      .map(r => ({ k: 'sb' + r.id, source: r.source, claim: r.claim, label: r.label, date: r.use_date, store: r.store, amount: r.amount }));
+    let snaps = [];
+    try { snaps = await all('cc_snapshots', 'mode,claim,data,saved_at'); } catch (e) { console.warn('cc_snapshots', e); }
+    await old.auth.signOut();
+    if (!confirm(`Supabaseから読みこみました：\n明細 ${tx.length}件・カード/MFの月 ${imports.length}件・月の記録 ${snaps.length}件・マスタ ${m.data?.data?.rows?.length || 0}行\n\nFirebaseにコピーしますか？`)) return;
+    btn.textContent = 'コピー中…';
+    state = { master: m.data?.data?.axes ? m.data.data : state.master, tx, imports, snapshots: snaps.map(x => ({ mode: x.mode, claim: x.claim, data: x.data, saved_at: x.saved_at })) };
+    await cloudWrite(async () => {
+      await userCol('settings').doc('master').set({ json: JSON.stringify(state.master), updated_at: new Date().toISOString() });
+      await writeStatements(imports.map(i => [i.source, i.claim]));
+      await commitOps(state.snapshots.map(x => ({ ref: userCol('snapshots').doc(`${x.mode}_${x.claim}`), data: { mode: x.mode, claim: x.claim, saved_at: x.saved_at, json: JSON.stringify(x.data) } })));
+    });
+    sel = { card: null, mf: null };
+    toast('引っこし完了 🎉 Firebaseに保存しました');
+    await cloudLoad();
+  } catch (e) {
+    console.error(e); toast(e.message || String(e));
+  } finally { btn.disabled = false; btn.textContent = '引っこす'; render(); }
 }
 render();
 </script>
